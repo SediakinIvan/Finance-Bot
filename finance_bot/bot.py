@@ -31,7 +31,10 @@ from finance_bot.sheets import CategoryOption, SheetsError
 from finance_bot.version import version_text
 
 logger = logging.getLogger(__name__)
+ADD_TRANSACTION_BUTTON = "добавить транзакцию"
 RECENT_TRANSACTIONS_BUTTON = "Последние 10 операций"
+VERSION_BUTTON = "версия"
+CANCEL_TRANSACTION_BUTTON = "отменить текущую запись"
 _MAX_REPLY_TEXT_LENGTH = 2000
 
 
@@ -66,6 +69,17 @@ def _forget_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _cancel_keyboard() -> list[list[InlineKeyboardButton]]:
     return [[InlineKeyboardButton("Отмена", callback_data="flow:cancel")]]
+
+
+def _main_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [ADD_TRANSACTION_BUTTON, RECENT_TRANSACTIONS_BUTTON],
+            [VERSION_BUTTON, CANCEL_TRANSACTION_BUTTON],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def _choice_keyboard(
@@ -156,17 +170,14 @@ def _render_preview(context: ContextTypes.DEFAULT_TYPE) -> str:
 async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "Команды:\n"
-        "/add — добавить доход или расход\n"
+        f"Кнопка «{ADD_TRANSACTION_BUTTON}» или /add — добавить доход или расход\n"
         f"Кнопка «{RECENT_TRANSACTIONS_BUTTON}» — показать последние 10 операций\n"
-        "/cancel — отменить текущий ввод\n"
-        "/version — показать версию бота\n"
+        f"Кнопка «{VERSION_BUTTON}» или /version — показать версию бота\n"
+        f"Кнопка «{CANCEL_TRANSACTION_BUTTON}» или /cancel — отменить текущий ввод\n"
         "/help — показать эту справку\n\n"
         "После заполнения бот покажет строку для подтверждения и добавит её "
         "только в лист «Траты».",
-        reply_markup=ReplyKeyboardMarkup(
-            [["/add", RECENT_TRANSACTIONS_BUTTON]],
-            resize_keyboard=True,
-        ),
+        reply_markup=_main_menu_keyboard(),
     )
 
 
@@ -536,6 +547,15 @@ async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
+async def cancel_current_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not any(key in context.user_data for key in _FLOW_KEYS):
+        await update.effective_message.reply_text("Нет активной записи для отмены.")
+        return ConversationHandler.END
+    return await cancel_flow(update, context)
+
+
 async def stale_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if await _reject_unauthorized_callback(update, context):
@@ -549,7 +569,17 @@ def build_conversation(settings: Settings) -> ConversationHandler:
     authorized = filters.User(user_id=settings.allowed_telegram_user_id)
     text_input = filters.TEXT & ~filters.COMMAND & authorized
     return ConversationHandler(
-        entry_points=[CommandHandler("add", start_add, filters=authorized)],
+        entry_points=[
+            CommandHandler("add", start_add, filters=authorized),
+            MessageHandler(
+                filters.Regex(rf"^{re.escape(ADD_TRANSACTION_BUTTON)}$") & authorized,
+                start_add,
+            ),
+            MessageHandler(
+                filters.Regex(rf"^{re.escape(CANCEL_TRANSACTION_BUTTON)}$") & authorized,
+                cancel_current_entry,
+            ),
+        ],
         states={
             State.DATE: [
                 CallbackQueryHandler(choose_date, pattern=r"^date:(today|yesterday|custom)$")
@@ -576,6 +606,7 @@ def build_conversation(settings: Settings) -> ConversationHandler:
         fallbacks=[
             CommandHandler("cancel", cancel_flow, filters=authorized),
             CommandHandler("help", start_help, filters=authorized),
+            CommandHandler("version", show_version, filters=authorized),
             CallbackQueryHandler(cancel_flow, pattern=r"^flow:cancel$"),
             CallbackQueryHandler(stale_callback),
         ],
@@ -595,9 +626,15 @@ def register_handlers(application: Application, settings: Settings) -> None:
             show_recent_transactions,
         )
     )
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(rf"^{re.escape(VERSION_BUTTON)}$") & authorized,
+            show_version,
+        )
+    )
+    application.add_handler(CommandHandler("version", show_version, filters=authorized))
     application.add_handler(build_conversation(settings))
     application.add_handler(CommandHandler(["start", "help"], start_help, filters=authorized))
-    application.add_handler(CommandHandler("version", show_version, filters=authorized))
     application.add_handler(
         CallbackQueryHandler(stale_callback),
         group=1,

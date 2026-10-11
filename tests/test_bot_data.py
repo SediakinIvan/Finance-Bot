@@ -14,7 +14,9 @@ from finance_bot.bot import (
     _parse_date,
     _reject_unauthorized_callback,
     build_conversation,
+    cancel_current_entry,
     show_recent_transactions,
+    start_help,
     show_version,
 )
 from finance_bot.config import Settings
@@ -147,6 +149,52 @@ class TransactionsStoreTests(unittest.TestCase):
 
 
 class TelegramHandlerTests(unittest.TestCase):
+    def test_help_shows_requested_persistent_menu_buttons(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=None,
+            effective_message=SimpleNamespace(reply_text=reply_text)
+        )
+
+        asyncio.run(start_help(update, SimpleNamespace()))
+
+        keyboard = reply_text.await_args.kwargs["reply_markup"]
+        self.assertTrue(keyboard.is_persistent)
+        self.assertEqual(
+            [[button.text for button in row] for row in keyboard.keyboard],
+            [
+                ["добавить транзакцию", "Последние 10 операций"],
+                ["версия", "отменить текущую запись"],
+            ],
+        )
+
+    def test_cancel_button_reports_when_no_entry_is_active(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=None,
+            effective_message=SimpleNamespace(reply_text=reply_text)
+        )
+        context = SimpleNamespace(user_data={})
+
+        result = asyncio.run(cancel_current_entry(update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        reply_text.assert_awaited_once_with("Нет активной записи для отмены.")
+
+    def test_cancel_button_clears_active_entry(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=None,
+            effective_message=SimpleNamespace(reply_text=reply_text)
+        )
+        context = SimpleNamespace(user_data={"pnl_date": "10.10.2026"})
+
+        result = asyncio.run(cancel_current_entry(update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(context.user_data, {})
+        reply_text.assert_awaited_once_with("Ввод отменён; таблица не изменена.")
+
     def test_version_command_reports_build_version_and_short_commit(self) -> None:
         reply_text = AsyncMock()
         update = SimpleNamespace(
