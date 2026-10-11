@@ -76,18 +76,24 @@ git push -u origin main
 
 Review `git status` before committing. The `.gitignore` excludes `.env`, credentials in `secrets/`, virtual environments, and CSV exports in `data/`; only `data/categories-template.csv` is kept. Do not force-add private files.
 
-GitHub Actions runs unit tests and builds the Docker image on pull requests and pushes to `main`. On a successful push to `main`, it also publishes the image to GitHub Container Registry (GHCR). VPS deployment with Docker Compose over SSH remains **disabled by default** and will only run after the VPS is prepared and `ENABLE_VPS_DEPLOY` is set to `true`.
+GitHub Actions runs unit tests and builds the Docker image on pull requests, pushes to `main`, and manual workflow runs. On a successful push to `main` or a manual run targeting `main`, it publishes the image to GitHub Container Registry (GHCR). VPS deployment with Docker Compose over SSH remains **disabled by default** and will only run after the VPS is prepared and `ENABLE_VPS_DEPLOY` is set to `true`.
 
 ### Prepare the Ubuntu 24.04 VPS
 
-Install Docker Engine and the Docker Compose plugin from Docker's official Ubuntu repository. Create a deployment account with SSH access and permission to use Docker. Docker access is root-equivalent, so use a dedicated account and protect its SSH key. Allow outbound HTTPS from the VPS to GHCR.
+The target Ubuntu 24.04 VPS has Docker Engine and Docker Compose installed, and a dedicated `financebot-deploy` account with SSH-key access and Docker permissions. Docker access is root-equivalent, so protect its SSH key. Allow outbound HTTPS from the VPS to GHCR.
 
 Before enabling deployment, create `/opt/financebot/.env` on the VPS with the required settings from `.env.example`. Set `GOOGLE_CREDENTIALS_FILE` to `/run/secrets/google-service-account.json`. Put the service-account key at `/opt/financebot/secrets/google-service-account.json`, readable by the container's UID `10001` (for example, owned by `10001:10001` with mode `0400`). Protect the directory and `.env`; neither is copied by deployments. The app is configured to run as a non-root user in a read-only container, with no published ports.
 
 The first image is private in GHCR. Create a GitHub personal access token with `read:packages` for the VPS image pull and deployment workflow. In GitHub, create a `production` environment and set these **environment secrets**:
 
 - `VPS_SSH_PRIVATE_KEY`: private SSH key authorized for the VPS deployment account.
-- `VPS_KNOWN_HOSTS`: verified SSH host key for the VPS. Verify the fingerprint through a trusted channel.
+- `VPS_KNOWN_HOSTS`: verified SSH host key for the VPS. The currently verified known-hosts line is:
+
+  ```text
+  89.125.90.156 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK1u1JstGWLGXCUy3OV0hckBF9C4Cwc5d4r/aW3Sp16u
+  ```
+
+  Its fingerprint, verified against the key on the VPS, is `SHA256:buwlUuqRTfopPVWID7YhJ0ZlQLp1WP4cS9Xga2zgBok`.
 - `GHCR_PULL_TOKEN`: token with permission to pull this package.
 
 Set these **repository variables** under **Settings → Secrets and variables → Actions → Variables**:
@@ -98,4 +104,4 @@ Set these **repository variables** under **Settings → Secrets and variables �
 - Optional `VPS_PORT` (default `22`) and `VPS_APP_DIR` (default `/opt/financebot`).
 - `ENABLE_VPS_DEPLOY`: set to `true` only after Docker, the server `.env`, credentials file, and all deployment secrets are ready.
 
-Deployment intentionally fails rather than modifying the server if `.env` or the Google key is missing. After the VPS is prepared and GitHub secrets/variables are set, setting `ENABLE_VPS_DEPLOY=true` allows pushes to `main` to deploy the exact commit image. Pull requests run tests and build the image but never publish or deploy it. The workflow does not bootstrap Docker or create server credentials.
+Deployment intentionally fails rather than modifying the server if `.env` or the Google key is missing. After the VPS is prepared and GitHub secrets/variables are set, setting `ENABLE_VPS_DEPLOY=true` allows pushes to `main` and manual workflow runs on `main` to deploy the exact commit image. Pull requests run tests and build the image but never publish or deploy it. The workflow does not bootstrap Docker or create server credentials.
