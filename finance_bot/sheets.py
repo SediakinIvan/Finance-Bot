@@ -81,7 +81,7 @@ def parse_taxonomy_rows(rows: Sequence[Sequence[Any]]) -> list[CategoryOption]:
 
 
 class GoogleSheetsStore:
-    """Minimal Sheets adapter: category reads and append-only Траты writes."""
+    """Minimal Sheets adapter for category reads and Траты transactions."""
 
     def __init__(
         self,
@@ -130,16 +130,57 @@ class GoogleSheetsStore:
             raise ValueError("A transaction row must contain exactly six values.")
         try:
             worksheet = self._get_spreadsheet().worksheet(self.transactions_sheet)
-            worksheet.append_row(
-                list(row),
+            first_data_row = 2
+            if worksheet.row_count >= first_data_row:
+                dates = worksheet.get(f"A{first_data_row}:A{worksheet.row_count}")
+                available_rows = worksheet.row_count - first_data_row + 1
+                empty_offset = next(
+                    (
+                        offset
+                        for offset, values in enumerate(dates)
+                        if not values or not str(values[0]).strip()
+                    ),
+                    None,
+                )
+                if empty_offset is None and len(dates) < available_rows:
+                    empty_offset = len(dates)
+                if empty_offset is None:
+                    worksheet.add_rows(1)
+                    target_row = worksheet.row_count
+                else:
+                    target_row = first_data_row + empty_offset
+            else:
+                worksheet.add_rows(1)
+                target_row = first_data_row
+
+            worksheet.update(
+                values=[list(row)],
+                range_name=f"A{target_row}:F{target_row}",
                 value_input_option="RAW",
-                insert_data_option="INSERT_ROWS",
-                table_range="A:F",
             )
         except Exception as exc:
-            # Do not automatically retry: a network failure can occur after Sheets
-            # accepted the append, and retrying could create a duplicate transaction.
             raise SheetsError(
-                f"Could not append to the '{self.transactions_sheet}' sheet. "
+                f"Could not write to the '{self.transactions_sheet}' sheet. "
                 "Check the row in Google Sheets before trying again."
+            ) from exc
+
+    def get_recent_transactions(self, limit: int = 10) -> list[list[str]]:
+        if limit <= 0:
+            raise ValueError("The transaction limit must be positive.")
+        try:
+            worksheet = self._get_spreadsheet().worksheet(self.transactions_sheet)
+            if worksheet.row_count < 2:
+                return []
+            rows = worksheet.get(f"A2:F{worksheet.row_count}")
+            transactions: list[list[str]] = []
+            for values in rows:
+                if not values or not str(values[0]).strip():
+                    continue
+                transaction = [str(value) for value in values[:6]]
+                transaction.extend([""] * (6 - len(transaction)))
+                transactions.append(transaction)
+            return transactions[-limit:]
+        except Exception as exc:
+            raise SheetsError(
+                f"Could not read recent rows from the '{self.transactions_sheet}' sheet."
             ) from exc

@@ -10,7 +10,12 @@ from enum import IntEnum
 from typing import Any, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -26,6 +31,8 @@ from finance_bot.sheets import CategoryOption, SheetsError
 from finance_bot.version import version_text
 
 logger = logging.getLogger(__name__)
+RECENT_TRANSACTIONS_BUTTON = "Последние 10 операций"
+_MAX_REPLY_TEXT_LENGTH = 2000
 
 
 class State(IntEnum):
@@ -150,16 +157,68 @@ async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(
         "Команды:\n"
         "/add — добавить доход или расход\n"
+        f"Кнопка «{RECENT_TRANSACTIONS_BUTTON}» — показать последние 10 операций\n"
         "/cancel — отменить текущий ввод\n"
         "/version — показать версию бота\n"
         "/help — показать эту справку\n\n"
         "После заполнения бот покажет строку для подтверждения и добавит её "
-        "только в лист «Траты»."
+        "только в лист «Траты».",
+        reply_markup=ReplyKeyboardMarkup(
+            [["/add", RECENT_TRANSACTIONS_BUTTON]],
+            resize_keyboard=True,
+        ),
     )
 
 
 async def show_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(version_text())
+
+
+def _recent_transaction_messages(rows: Sequence[Sequence[str]]) -> list[str]:
+    if not rows:
+        return ["В таблице пока нет операций."]
+
+    blocks = ["Последние операции (от более старых к новым):"]
+    for number, row in enumerate(rows, start=1):
+        date_value, category, subcategory, amount, transaction_type, note = row
+        blocks.append(
+            f"{number}. Дата: {date_value}\n"
+            f"   Тип: {transaction_type}\n"
+            f"   Категория: {category}\n"
+            f"   Подкатегория: {subcategory}\n"
+            f"   Сумма: {amount} ₽\n"
+            f"   Примечание: {note or '—'}"
+        )
+
+    messages: list[str] = []
+    current = ""
+    for block in blocks:
+        for offset in range(0, len(block), _MAX_REPLY_TEXT_LENGTH):
+            part = block[offset : offset + _MAX_REPLY_TEXT_LENGTH]
+            if current and len(current) + len(part) + 2 > _MAX_REPLY_TEXT_LENGTH:
+                messages.append(current)
+                current = ""
+            current = f"{current}\n\n{part}" if current else part
+    if current:
+        messages.append(current)
+    return messages
+
+
+async def show_recent_transactions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    try:
+        rows = await asyncio.to_thread(_store(context).get_recent_transactions)
+    except SheetsError as exc:
+        logger.warning("Could not read recent transactions: %s", exc)
+        await update.effective_message.reply_text(
+            "Не удалось прочитать последние операции из листа «Траты». "
+            "Проверьте доступ Google и попробуйте ещё раз."
+        )
+        return
+
+    for message in _recent_transaction_messages(rows):
+        await update.effective_message.reply_text(message)
 
 
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -529,8 +588,14 @@ def build_conversation(settings: Settings) -> ConversationHandler:
 
 
 def register_handlers(application: Application, settings: Settings) -> None:
-    application.add_handler(build_conversation(settings))
     authorized = filters.User(user_id=settings.allowed_telegram_user_id)
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(rf"^{re.escape(RECENT_TRANSACTIONS_BUTTON)}$") & authorized,
+            show_recent_transactions,
+        )
+    )
+    application.add_handler(build_conversation(settings))
     application.add_handler(CommandHandler(["start", "help"], start_help, filters=authorized))
     application.add_handler(CommandHandler("version", show_version, filters=authorized))
     application.add_handler(

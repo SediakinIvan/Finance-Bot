@@ -1,17 +1,17 @@
 # Telegram PnL entry bot
 
-A private Telegram bot for guided income/expense entry. It **only appends confirmed rows to the existing `Траты` sheet**; existing formulas and analysis remain in Google Sheets and are not edited. The bot reads button choices from a separate `Категории` sheet. It does not archive, clear, or otherwise update any other tab.
+A private Telegram bot for guided income/expense entry. It writes confirmed transactions into the first row with an empty `Дата` cell in the existing `Траты` sheet; existing formulas and analysis remain in Google Sheets and are not edited. The bot reads button choices from a separate `Категории` sheet. It does not archive, clear, or otherwise update any other tab.
 
 ## Current transaction flow
 
-1. `/add` → choose today, yesterday, or enter a date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted).
+1. `/add` → choose today, yesterday, or enter a date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted). A persistent **Последние 10 операций** button shows the ten most recent dated rows, numbered in sheet order.
 2. Choose expense or income.
 3. For an expense, choose its category and subcategory. For income, choose its source; the saved category is always `Доход`.
 4. Enter a positive integer RUB amount.
 5. Choose whether to add a note. If yes, type it (up to 1000 characters).
 6. Review the full entry and confirm or cancel.
 
-`/cancel` cancels an in-progress entry; `/help` shows the commands; `/version` reports the deployed release tag and short source commit. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets appends are not automatically retried, to avoid duplicate rows; inspect `Траты` before attempting again.
+`/cancel` cancels an in-progress entry; `/help` shows the commands; `/version` reports the deployed release tag and short source commit. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets writes are not automatically retried, to avoid duplicate transactions; inspect `Траты` before attempting again.
 
 ## One-time setup
 
@@ -51,7 +51,7 @@ Telegram's long-polling mode does not need a public URL. Only run one polling pr
 
 - Run automated tests with `python -m unittest discover -s tests`.
 - First test against a copy of the spreadsheet, with the bot token and allowlisted ID configured locally.
-- Verify the `Траты` row has exactly these columns in order: `Дата, Категория, Подкатегория, Сумма, Доход/Расход, Примечание`.
+- Verify the `Траты` row has exactly these columns in order: `Дата, Категория, Подкатегория, Сумма, Доход/Расход, Примечание`. New transactions reuse the first row whose `Дата` cell is empty.
 - Check that formulas recalculate after an appended row. The bot writes the date as text in `ДД.ММ.ГГГГ` format and uses RAW values so the positive integer amount stays numeric.
 
 ## Git and CI

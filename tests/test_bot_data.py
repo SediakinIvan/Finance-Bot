@@ -14,6 +14,7 @@ from finance_bot.bot import (
     _parse_date,
     _reject_unauthorized_callback,
     build_conversation,
+    show_recent_transactions,
     show_version,
 )
 from finance_bot.config import Settings
@@ -75,17 +76,23 @@ class InputValidationTests(unittest.TestCase):
                 _parse_amount(value)
 
 
-class AppendOnlyStoreTests(unittest.TestCase):
-    def test_append_writes_only_six_values_to_transactions_tab(self) -> None:
-        calls: list[tuple[str, list[object], dict[str, object]]] = []
+class TransactionsStoreTests(unittest.TestCase):
+    def test_writes_to_first_blank_date_even_when_rows_are_precreated(self) -> None:
+        calls: list[tuple[str, object, object]] = []
 
         class FakeWorksheet:
-            def append_row(self, values: list[object], **kwargs: object) -> None:
-                calls.append(("append", values, kwargs))
+            row_count = 10
+
+            def get(self, range_name: str) -> list[list[str]]:
+                calls.append(("get", range_name, None))
+                return [["01.10.2026"], ["02.10.2026"]]
+
+            def update(self, **kwargs: object) -> None:
+                calls.append(("update", kwargs, None))
 
         class FakeSpreadsheet:
             def worksheet(self, name: str) -> FakeWorksheet:
-                calls.append(("worksheet", [name], {}))
+                calls.append(("worksheet", name, None))
                 return FakeWorksheet()
 
         store = GoogleSheetsStore("unused.json", "unused-id")
@@ -93,14 +100,14 @@ class AppendOnlyStoreTests(unittest.TestCase):
         row = ["10.10.2026", "Доход", "Зарплата", 1000, "Доход", ""]
         store.append_transaction(row)
 
-        self.assertEqual(calls[0], ("worksheet", ["Траты"], {}))
-        self.assertEqual(calls[1][0:2], ("append", row))
+        self.assertEqual(calls[0], ("worksheet", "Траты", None))
+        self.assertEqual(calls[1], ("get", "A2:A10", None))
         self.assertEqual(
-            calls[1][2],
+            calls[2][1],
             {
+                "values": [row],
+                "range_name": "A4:F4",
                 "value_input_option": "RAW",
-                "insert_data_option": "INSERT_ROWS",
-                "table_range": "A:F",
             },
         )
 
@@ -108,6 +115,35 @@ class AppendOnlyStoreTests(unittest.TestCase):
         store = GoogleSheetsStore("unused.json", "unused-id")
         with self.assertRaises(ValueError):
             store.append_transaction(["too", "short"])
+
+    def test_returns_last_ten_dated_rows_in_sheet_order(self) -> None:
+        dated_rows = [
+            [f"{day:02}.10.2026", "Кафе", "Кофе", str(day * 100), "Расход", ""]
+            for day in range(1, 13)
+        ]
+        transaction_rows = [dated_rows[0], [], *dated_rows[1:]]
+
+        class FakeWorksheet:
+            row_count = 20
+
+            def get(self, range_name: str) -> list[list[str]]:
+                self.range_name = range_name
+                return transaction_rows
+
+        worksheet = FakeWorksheet()
+
+        class FakeSpreadsheetWithRows:
+            def worksheet(self, name: str) -> FakeWorksheet:
+                return worksheet
+
+        store = GoogleSheetsStore("unused.json", "unused-id")
+        store._spreadsheet = FakeSpreadsheetWithRows()
+
+        self.assertEqual(
+            store.get_recent_transactions(),
+            dated_rows[-10:],
+        )
+        self.assertEqual(worksheet.range_name, "A2:F20")
 
 
 class TelegramHandlerTests(unittest.TestCase):
@@ -124,6 +160,29 @@ class TelegramHandlerTests(unittest.TestCase):
             asyncio.run(show_version(update, SimpleNamespace()))
 
         reply_text.assert_awaited_once_with("Версия: v1.0.0\nКоммит: abcdef0")
+
+    def test_recent_button_returns_numbered_rows(self) -> None:
+        reply_text = AsyncMock()
+        row = ["10.10.2026", "Кафе", "Кофе", "250", "Расход", "с коллегой"]
+        store = SimpleNamespace(get_recent_transactions=lambda: [row])
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text)
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(bot_data={"sheets_store": store})
+        )
+
+        asyncio.run(show_recent_transactions(update, context))
+
+        reply_text.assert_awaited_once_with(
+            "Последние операции (от более старых к новым):\n\n"
+            "1. Дата: 10.10.2026\n"
+            "   Тип: Расход\n"
+            "   Категория: Кафе\n"
+            "   Подкатегория: Кофе\n"
+            "   Сумма: 250 ₽\n"
+            "   Примечание: с коллегой"
+        )
 
     def test_conversation_registers_with_configured_user_allowlist(self) -> None:
         settings = Settings(
