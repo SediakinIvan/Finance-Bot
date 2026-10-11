@@ -4,11 +4,11 @@ A private Telegram bot for guided income/expense entry. It writes confirmed tran
 
 ## Current transaction flow
 
-1. Press **добавить транзакцию** (or use `/add`) → choose today, yesterday, or enter a date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted). The persistent keyboard also offers **версия**, **отменить текущую запись**, and **Последние 10 операций**.
+1. Choose **Добавить транзакцию (сегодня)** or **Добавить транзакцию (вчера)** to use that date directly, or choose **Добавить транзакцию** (or `/add`) to enter another date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted). Today/yesterday flows skip the comment question; use **Добавить комментарий** in the confirmation if a note is needed. The persistent keyboard also offers **Версия**, **Отменить текущую запись**, and **Последние 10 операций**.
 2. Choose expense or income.
 3. For an expense, choose its category and subcategory. For income, choose its source; the saved category is always `Доход`.
 4. Enter a positive integer RUB amount.
-5. Choose whether to add a note. If yes, type it (up to 1000 characters).
+5. For a custom date, choose whether to add a note; for today/yesterday, optionally press **Добавить комментарий** in the confirmation. Notes are limited to 1000 characters.
 6. Review the full entry and confirm or cancel.
 
 The menu buttons have slash-command equivalents: `/cancel` cancels an in-progress entry, `/help` shows the menu, and `/version` reports the deployed release tag and short source commit. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets writes are not automatically retried, to avoid duplicate transactions; inspect `Траты` before attempting again.

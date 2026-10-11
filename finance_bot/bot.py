@@ -32,6 +32,8 @@ from finance_bot.version import version_text
 
 logger = logging.getLogger(__name__)
 ADD_TRANSACTION_BUTTON = "Добавить транзакцию"
+ADD_TODAY_TRANSACTION_BUTTON = "Добавить транзакцию (сегодня)"
+ADD_YESTERDAY_TRANSACTION_BUTTON = "Добавить транзакцию (вчера)"
 RECENT_TRANSACTIONS_BUTTON = "Последние 10 операций"
 VERSION_BUTTON = "Версия"
 CANCEL_TRANSACTION_BUTTON = "Отменить текущую запись"
@@ -39,15 +41,14 @@ _MAX_REPLY_TEXT_LENGTH = 2000
 
 
 class State(IntEnum):
-    DATE = 0
-    CUSTOM_DATE = 1
-    TYPE = 2
-    CATEGORY = 3
-    SUBCATEGORY = 4
-    AMOUNT = 5
-    NOTE_DECISION = 6
-    NOTE_TEXT = 7
-    CONFIRM = 8
+    CUSTOM_DATE = 0
+    TYPE = 1
+    CATEGORY = 2
+    SUBCATEGORY = 3
+    AMOUNT = 4
+    NOTE_DECISION = 5
+    NOTE_TEXT = 6
+    CONFIRM = 7
 
 
 _FLOW_KEYS = (
@@ -57,6 +58,7 @@ _FLOW_KEYS = (
     "pnl_subcategory",
     "pnl_amount",
     "pnl_note",
+    "pnl_optional_note",
     "pnl_options",
     "pnl_choices",
 )
@@ -74,6 +76,7 @@ def _cancel_keyboard() -> list[list[InlineKeyboardButton]]:
 def _main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
+            [ADD_TODAY_TRANSACTION_BUTTON, ADD_YESTERDAY_TRANSACTION_BUTTON],
             [ADD_TRANSACTION_BUTTON, RECENT_TRANSACTIONS_BUTTON],
             [VERSION_BUTTON, CANCEL_TRANSACTION_BUTTON],
         ],
@@ -167,10 +170,37 @@ def _render_preview(context: ContextTypes.DEFAULT_TYPE) -> str:
     )
 
 
+def _type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Расход", callback_data="type:expense"),
+                InlineKeyboardButton("Доход", callback_data="type:income"),
+            ],
+            *_cancel_keyboard(),
+        ]
+    )
+
+
+def _confirmation_keyboard(include_add_note: bool = False) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if include_add_note:
+        rows.append([InlineKeyboardButton("Добавить комментарий", callback_data="note:add")])
+    rows.append(
+        [
+            InlineKeyboardButton("Подтвердить запись", callback_data="save:yes"),
+            InlineKeyboardButton("Отменить", callback_data="save:no"),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
 async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "Команды:\n"
-        f"Кнопка «{ADD_TRANSACTION_BUTTON}» или /add — добавить доход или расход\n"
+        f"Кнопка «{ADD_TODAY_TRANSACTION_BUTTON}» — добавить операцию за сегодня\n"
+        f"Кнопка «{ADD_YESTERDAY_TRANSACTION_BUTTON}» — добавить операцию за вчера\n"
+        f"Кнопка «{ADD_TRANSACTION_BUTTON}» или /add — указать произвольную дату\n"
         f"Кнопка «{RECENT_TRANSACTIONS_BUTTON}» — показать последние 10 операций\n"
         f"Кнопка «{VERSION_BUTTON}» или /version — показать версию бота\n"
         f"Кнопка «{CANCEL_TRANSACTION_BUTTON}» или /cancel — отменить текущий ввод\n"
@@ -232,7 +262,11 @@ async def show_recent_transactions(
         await update.effective_message.reply_text(message)
 
 
-async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def _start_add(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    preset_day: str | None = None,
+) -> int:
     _forget_flow(context)
     try:
         options: list[CategoryOption] = await asyncio.to_thread(
@@ -254,52 +288,37 @@ async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         }
         for option in options
     ]
-    local_today = datetime.now(_timezone(context)).date()
-    yesterday = local_today - timedelta(days=1)
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Сегодня", callback_data="date:today")],
-            [InlineKeyboardButton("Вчера", callback_data="date:yesterday")],
-            [InlineKeyboardButton("Другая дата…", callback_data="date:custom")],
-            *_cancel_keyboard(),
-        ]
-    )
-    await update.effective_message.reply_text(
-        "Выберите дату операции:", reply_markup=keyboard
-    )
-    return State.DATE
-
-
-async def choose_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if await _reject_unauthorized_callback(update, context):
-        return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    choice = query.data.split(":", maxsplit=1)[1]
-    today = datetime.now(_timezone(context)).date()
-    if choice == "custom":
-        await query.edit_message_text(
+    if preset_day is None:
+        context.user_data["pnl_optional_note"] = False
+        await update.effective_message.reply_text(
             "Введите дату в формате ДД.ММ.ГГГГ (например, 10.10.2026).",
             reply_markup=InlineKeyboardMarkup(_cancel_keyboard()),
         )
         return State.CUSTOM_DATE
 
-    selected = today if choice == "today" else today - timedelta(days=1)
+    local_today = datetime.now(_timezone(context)).date()
+    selected = local_today if preset_day == "today" else local_today - timedelta(days=1)
     context.user_data["pnl_date"] = _format_date(selected)
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Расход", callback_data="type:expense"),
-                InlineKeyboardButton("Доход", callback_data="type:income"),
-            ],
-            *_cancel_keyboard(),
-        ]
-    )
-    await query.edit_message_text(
+    context.user_data["pnl_optional_note"] = True
+    await update.effective_message.reply_text(
         f"Дата: {_format_date(selected)}\nВыберите тип операции:",
-        reply_markup=keyboard,
+        reply_markup=_type_keyboard(),
     )
     return State.TYPE
+
+
+async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await _start_add(update, context)
+
+
+async def start_add_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await _start_add(update, context, "today")
+
+
+async def start_add_yesterday(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    return await _start_add(update, context, "yesterday")
 
 
 async def receive_custom_date(
@@ -312,18 +331,9 @@ async def receive_custom_date(
         return State.CUSTOM_DATE
 
     context.user_data["pnl_date"] = _format_date(selected)
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Расход", callback_data="type:expense"),
-                InlineKeyboardButton("Доход", callback_data="type:income"),
-            ],
-            *_cancel_keyboard(),
-        ]
-    )
     await update.effective_message.reply_text(
         f"Дата: {_format_date(selected)}\nВыберите тип операции:",
-        reply_markup=keyboard,
+        reply_markup=_type_keyboard(),
     )
     return State.TYPE
 
@@ -420,7 +430,19 @@ async def choose_subcategory(
 
     transaction_type = context.user_data["pnl_type"]
     context.user_data["pnl_subcategory"] = subcategory
-    context.user_data["pnl_category"] = "Доход" if transaction_type == "Доход" else context.user_data["pnl_category"]
+    context.user_data["pnl_category"] = (
+        "Доход"
+        if transaction_type == "Доход"
+        else context.user_data["pnl_category"]
+    )
+    if context.user_data.get("pnl_optional_note"):
+        context.user_data["pnl_note"] = ""
+        await query.edit_message_text(
+            _render_preview(context),
+            reply_markup=_confirmation_keyboard(include_add_note=True),
+        )
+        return State.CONFIRM
+
     await query.edit_message_text(
         f"Подкатегория: {subcategory}\nВведите сумму целым числом рублей:"
     )
@@ -469,17 +491,6 @@ async def choose_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return State.CONFIRM
 
 
-def _confirmation_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Подтвердить запись", callback_data="save:yes"),
-                InlineKeyboardButton("Отменить", callback_data="save:no"),
-            ]
-        ]
-    )
-
-
 async def receive_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     note = update.effective_message.text.strip()
     if not note:
@@ -493,9 +504,27 @@ async def receive_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     context.user_data["pnl_note"] = note
     await update.effective_message.reply_text(
-        _render_preview(context), reply_markup=_confirmation_keyboard()
+        _render_preview(context),
+        reply_markup=_confirmation_keyboard(
+            include_add_note=bool(context.user_data.get("pnl_optional_note"))
+            and not note
+        ),
     )
     return State.CONFIRM
+
+
+async def request_optional_note(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Введите комментарий (до 1000 символов):",
+        reply_markup=InlineKeyboardMarkup(_cancel_keyboard()),
+    )
+    return State.NOTE_TEXT
 
 
 async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -567,7 +596,15 @@ async def stale_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def build_conversation(settings: Settings) -> ConversationHandler:
     authorized = filters.User(user_id=settings.allowed_telegram_user_id)
-    text_input = filters.TEXT & ~filters.COMMAND & authorized
+    main_menu_button = filters.Regex(
+        rf"^({re.escape(ADD_TRANSACTION_BUTTON)}|"
+        rf"{re.escape(ADD_TODAY_TRANSACTION_BUTTON)}|"
+        rf"{re.escape(ADD_YESTERDAY_TRANSACTION_BUTTON)}|"
+        rf"{re.escape(RECENT_TRANSACTIONS_BUTTON)}|"
+        rf"{re.escape(VERSION_BUTTON)}|"
+        rf"{re.escape(CANCEL_TRANSACTION_BUTTON)})$"
+    )
+    text_input = filters.TEXT & ~filters.COMMAND & ~main_menu_button & authorized
     return ConversationHandler(
         entry_points=[
             CommandHandler("add", start_add, filters=authorized),
@@ -576,14 +613,19 @@ def build_conversation(settings: Settings) -> ConversationHandler:
                 start_add,
             ),
             MessageHandler(
+                filters.Regex(rf"^{re.escape(ADD_TODAY_TRANSACTION_BUTTON)}$") & authorized,
+                start_add_today,
+            ),
+            MessageHandler(
+                filters.Regex(rf"^{re.escape(ADD_YESTERDAY_TRANSACTION_BUTTON)}$") & authorized,
+                start_add_yesterday,
+            ),
+            MessageHandler(
                 filters.Regex(rf"^{re.escape(CANCEL_TRANSACTION_BUTTON)}$") & authorized,
                 cancel_current_entry,
             ),
         ],
         states={
-            State.DATE: [
-                CallbackQueryHandler(choose_date, pattern=r"^date:(today|yesterday|custom)$")
-            ],
             State.CUSTOM_DATE: [MessageHandler(text_input, receive_custom_date)],
             State.TYPE: [
                 CallbackQueryHandler(choose_type, pattern=r"^type:(expense|income)$")
@@ -600,13 +642,18 @@ def build_conversation(settings: Settings) -> ConversationHandler:
             ],
             State.NOTE_TEXT: [MessageHandler(text_input, receive_note)],
             State.CONFIRM: [
-                CallbackQueryHandler(confirm_save, pattern=r"^save:(yes|no)$")
+                CallbackQueryHandler(confirm_save, pattern=r"^save:(yes|no)$"),
+                CallbackQueryHandler(request_optional_note, pattern=r"^note:add$"),
             ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel_flow, filters=authorized),
             CommandHandler("help", start_help, filters=authorized),
             CommandHandler("version", show_version, filters=authorized),
+            MessageHandler(
+                filters.Regex(rf"^{re.escape(CANCEL_TRANSACTION_BUTTON)}$") & authorized,
+                cancel_current_entry,
+            ),
             CallbackQueryHandler(cancel_flow, pattern=r"^flow:cancel$"),
             CallbackQueryHandler(stale_callback),
         ],

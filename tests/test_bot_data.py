@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -13,9 +13,15 @@ from finance_bot.bot import (
     _parse_amount,
     _parse_date,
     _reject_unauthorized_callback,
+    State,
     build_conversation,
+    choose_subcategory,
     cancel_current_entry,
+    request_optional_note,
     show_recent_transactions,
+    start_add,
+    start_add_today,
+    start_add_yesterday,
     start_help,
     show_version,
 )
@@ -163,9 +169,127 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(
             [[button.text for button in row] for row in keyboard.keyboard],
             [
+                ["Добавить транзакцию (сегодня)", "Добавить транзакцию (вчера)"],
                 ["Добавить транзакцию", "Последние 10 операций"],
                 ["Версия", "Отменить текущую запись"],
             ],
+        )
+
+    def test_date_buttons_prefill_today_and_yesterday(self) -> None:
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+            timezone="UTC",
+        )
+        store = SimpleNamespace(
+            load_taxonomy=lambda: [CategoryOption("Расход", "Кафе", "Кофе")]
+        )
+        context = SimpleNamespace(
+            user_data={},
+            application=SimpleNamespace(
+                bot_data={"settings": settings, "sheets_store": store}
+            ),
+        )
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text)
+        )
+
+        with patch("finance_bot.bot.datetime") as mocked_datetime:
+            mocked_datetime.now.return_value = datetime(
+                2026, 10, 11, 12, 0, tzinfo=timezone.utc
+            )
+            today_result = asyncio.run(start_add_today(update, context))
+            self.assertEqual(today_result, State.TYPE)
+            self.assertEqual(context.user_data["pnl_date"], "11.10.2026")
+            self.assertTrue(context.user_data["pnl_optional_note"])
+
+            yesterday_result = asyncio.run(start_add_yesterday(update, context))
+            self.assertEqual(yesterday_result, State.TYPE)
+            self.assertEqual(context.user_data["pnl_date"], "10.10.2026")
+            self.assertTrue(context.user_data["pnl_optional_note"])
+
+            custom_result = asyncio.run(start_add(update, context))
+            self.assertEqual(custom_result, State.CUSTOM_DATE)
+            self.assertFalse(context.user_data["pnl_optional_note"])
+
+        self.assertEqual(reply_text.await_count, 3)
+        self.assertIn("Введите дату", reply_text.await_args_list[-1].args[0])
+
+    def test_preset_date_skips_note_question_but_offers_optional_comment(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="sub:0",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            )
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_type": "Расход",
+                "pnl_category": "Кафе",
+                "pnl_choices": ["Кофе"],
+                "pnl_date": "11.10.2026",
+                "pnl_amount": 250,
+                "pnl_optional_note": True,
+            },
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(choose_subcategory(update, context))
+
+        self.assertEqual(result, State.CONFIRM)
+        self.assertEqual(context.user_data["pnl_note"], "")
+        self.assertIn("Примечание: —", edit_message_text.await_args.args[0])
+        callback_data = [
+            button.callback_data
+            for row in edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("note:add", callback_data)
+        self.assertIn("save:yes", callback_data)
+
+    def test_optional_comment_button_prompts_for_comment(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="note:add",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            )
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={},
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(request_optional_note(update, context))
+
+        self.assertEqual(result, State.NOTE_TEXT)
+        answer.assert_awaited_once_with()
+        edit_message_text.assert_awaited_once()
+        self.assertEqual(
+            edit_message_text.await_args.args[0],
+            "Введите комментарий (до 1000 символов):",
         )
 
     def test_cancel_button_reports_when_no_entry_is_active(self) -> None:
