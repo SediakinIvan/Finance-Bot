@@ -153,6 +153,19 @@ def _taxonomy(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, str]]:
     return context.user_data["pnl_options"]
 
 
+def _set_subcategory(
+    context: ContextTypes.DEFAULT_TYPE, subcategory: str
+) -> str:
+    transaction_type = context.user_data["pnl_type"]
+    context.user_data["pnl_subcategory"] = subcategory
+    context.user_data["pnl_category"] = (
+        "Доход"
+        if transaction_type == "Доход"
+        else context.user_data["pnl_category"]
+    )
+    return f"Подкатегория: {subcategory}\nВведите сумму целым числом рублей:"
+
+
 def _render_preview(context: ContextTypes.DEFAULT_TYPE) -> str:
     kind = context.user_data["pnl_type"]
     label = "Доход" if kind == "Доход" else "Расход"
@@ -187,7 +200,7 @@ def _confirmation_keyboard(include_add_note: bool = False) -> InlineKeyboardMark
         rows.append([InlineKeyboardButton("Добавить комментарий", callback_data="note:add")])
     rows.append(
         [
-            InlineKeyboardButton("✅ Подтвердить запись", callback_data="save:yes"),
+            InlineKeyboardButton("Подтвердить", callback_data="save:yes"),
             InlineKeyboardButton("❌ Отменить", callback_data="save:no"),
         ]
     )
@@ -356,6 +369,9 @@ async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 "Для доходов нет подкатегорий в листе «Категории»."
             )
             return ConversationHandler.END
+        if len(choices) == 1:
+            await query.edit_message_text(_set_subcategory(context, choices[0]))
+            return State.AMOUNT
         context.user_data["pnl_choices"] = choices
         await query.edit_message_text(
             "Выберите источник дохода:",
@@ -405,6 +421,9 @@ async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Обновите список и начните заново командой /add."
         )
         return ConversationHandler.END
+    if len(choices) == 1:
+        await query.edit_message_text(_set_subcategory(context, choices[0]))
+        return State.AMOUNT
     context.user_data["pnl_choices"] = choices
     await query.edit_message_text(
         f"Категория: {category}\nВыберите подкатегорию:",
@@ -427,16 +446,7 @@ async def choose_subcategory(
         await query.edit_message_text("Кнопка устарела. Начните заново командой /add.")
         return ConversationHandler.END
 
-    transaction_type = context.user_data["pnl_type"]
-    context.user_data["pnl_subcategory"] = subcategory
-    context.user_data["pnl_category"] = (
-        "Доход"
-        if transaction_type == "Доход"
-        else context.user_data["pnl_category"]
-    )
-    await query.edit_message_text(
-        f"Подкатегория: {subcategory}\nВведите сумму целым числом рублей:"
-    )
+    await query.edit_message_text(_set_subcategory(context, subcategory))
     return State.AMOUNT
 
 

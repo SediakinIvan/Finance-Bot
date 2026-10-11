@@ -15,7 +15,9 @@ from finance_bot.bot import (
     _reject_unauthorized_callback,
     State,
     build_conversation,
+    choose_category,
     choose_subcategory,
+    choose_type,
     receive_amount,
     cancel_current_entry,
     request_optional_note,
@@ -253,6 +255,112 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(context.user_data["pnl_subcategory"], "Кофе")
         self.assertIn("Введите сумму", edit_message_text.await_args.args[0])
 
+    def test_single_expense_subcategory_is_selected_automatically(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="cat:0",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            )
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_type": "Расход",
+                "pnl_choices": ["REST"],
+                "pnl_options": [
+                    {"type": "Расход", "category": "REST", "subcategory": "REST"}
+                ],
+            },
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(choose_category(update, context))
+
+        self.assertEqual(result, State.AMOUNT)
+        self.assertEqual(context.user_data["pnl_category"], "REST")
+        self.assertEqual(context.user_data["pnl_subcategory"], "REST")
+        self.assertIn("Введите сумму", edit_message_text.await_args.args[0])
+        self.assertIsNone(edit_message_text.await_args.kwargs.get("reply_markup"))
+
+    def test_multiple_expense_subcategories_still_require_selection(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="cat:0",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            )
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_type": "Расход",
+                "pnl_choices": ["Кафе"],
+                "pnl_options": [
+                    {"type": "Расход", "category": "Кафе", "subcategory": "Кофе"},
+                    {"type": "Расход", "category": "Кафе", "subcategory": "Обед"},
+                ],
+            },
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(choose_category(update, context))
+
+        self.assertEqual(result, State.SUBCATEGORY)
+        self.assertEqual(context.user_data["pnl_choices"], ["Кофе", "Обед"])
+        self.assertIn("Выберите подкатегорию", edit_message_text.await_args.args[0])
+        self.assertIsNotNone(edit_message_text.await_args.kwargs["reply_markup"])
+
+    def test_single_income_subcategory_is_selected_automatically(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="type:income",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            )
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_options": [
+                    {"type": "Доход", "category": "Доход", "subcategory": "Зарплата"}
+                ]
+            },
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(choose_type(update, context))
+
+        self.assertEqual(result, State.AMOUNT)
+        self.assertEqual(context.user_data["pnl_category"], "Доход")
+        self.assertEqual(context.user_data["pnl_subcategory"], "Зарплата")
+        self.assertIn("Введите сумму", edit_message_text.await_args.args[0])
+        self.assertIsNone(edit_message_text.await_args.kwargs.get("reply_markup"))
+
     def test_amount_proceeds_directly_to_confirmation_with_optional_comment(self) -> None:
         reply_text = AsyncMock()
         update = SimpleNamespace(
@@ -289,7 +397,7 @@ class TelegramHandlerTests(unittest.TestCase):
         ]
         self.assertEqual(
             confirmation_labels,
-            ["✅ Подтвердить запись", "❌ Отменить"],
+            ["Подтвердить", "❌ Отменить"],
         )
 
     def test_optional_comment_button_prompts_for_comment(self) -> None:
