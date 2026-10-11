@@ -281,6 +281,16 @@ class TelegramHandlerTests(unittest.TestCase):
         ]
         self.assertIn("note:add", callback_data)
         self.assertIn("save:yes", callback_data)
+        confirmation_labels = [
+            button.text
+            for row in reply_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+            if button.callback_data in {"save:yes", "save:no"}
+        ]
+        self.assertEqual(
+            confirmation_labels,
+            ["✅ Подтвердить запись", "❌ Отменить"],
+        )
 
     def test_optional_comment_button_prompts_for_comment(self) -> None:
         answer = AsyncMock()

@@ -187,8 +187,8 @@ def _confirmation_keyboard(include_add_note: bool = False) -> InlineKeyboardMark
         rows.append([InlineKeyboardButton("Добавить комментарий", callback_data="note:add")])
     rows.append(
         [
-            InlineKeyboardButton("Подтвердить запись", callback_data="save:yes"),
-            InlineKeyboardButton("Отменить", callback_data="save:no"),
+            InlineKeyboardButton("✅ Подтвердить запись", callback_data="save:yes"),
+            InlineKeyboardButton("❌ Отменить", callback_data="save:no"),
         ]
     )
     return InlineKeyboardMarkup(rows)
