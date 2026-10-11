@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+.env
+.env.*
+secrets/
+tests/
+data/*.csv
+!data/categories-template.csv

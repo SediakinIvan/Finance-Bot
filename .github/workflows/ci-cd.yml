@@ -30,3 +30,107 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run tests
         run: python -m unittest discover -s tests -v
+      - name: Build container image
+        run: docker build --tag finance-bot:test .
+
+  build:
+    name: Build and publish container
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/sediakinivan/finance-bot:${{ github.sha }}
+            ghcr.io/sediakinivan/finance-bot:latest
+
+  deploy:
+    name: Deploy container to VPS
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.ENABLE_VPS_DEPLOY == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST }}
+      VPS_USER: ${{ vars.VPS_USER }}
+      VPS_PORT: ${{ vars.VPS_PORT || '22' }}
+      VPS_APP_DIR: ${{ vars.VPS_APP_DIR || '/opt/financebot' }}
+      VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Deploy with Docker Compose over SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${VPS_HOST:?Set the VPS_HOST repository variable}"
+          : "${VPS_USER:?Set the VPS_USER repository variable}"
+          : "${VPS_SSH_PRIVATE_KEY:?Set the VPS_SSH_PRIVATE_KEY production secret}"
+          : "${VPS_KNOWN_HOSTS:?Set the VPS_KNOWN_HOSTS production secret}"
+          : "${GHCR_USERNAME:?Set the GHCR_USERNAME repository variable}"
+          : "${GHCR_PULL_TOKEN:?Set the GHCR_PULL_TOKEN production secret}"
+
+          if [[ ! "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ ]] ||
+             [[ ! "$VPS_USER" =~ ^[A-Za-z0-9_.-]+$ ]] ||
+             [[ ! "$GHCR_USERNAME" =~ ^[A-Za-z0-9-]+$ ]] ||
+             [[ ! "$VPS_PORT" =~ ^[0-9]+$ ]] ||
+             [[ ! "$VPS_APP_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
+             [[ "$VPS_APP_DIR" =~ (^|/)\.\.(/|$) ]]; then
+            echo "Invalid VPS host, user, port, or application directory." >&2
+            exit 1
+          fi
+
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"
+
+          ssh_options=(
+            -i "$RUNNER_TEMP/ssh/key"
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts"
+            -p "$VPS_PORT"
+          )
+          remote="$VPS_USER@$VPS_HOST"
+
+          ssh "${ssh_options[@]}" "$remote" \
+            "mkdir -p '$VPS_APP_DIR' &&
+             test -f '$VPS_APP_DIR/.env' &&
+             test -f '$VPS_APP_DIR/secrets/google-service-account.json'"
+          scp -i "$RUNNER_TEMP/ssh/key" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts" \
+            -P "$VPS_PORT" \
+            compose.yaml "$remote:$VPS_APP_DIR/compose.yaml"
+
+          printf '%s\n' "$GHCR_PULL_TOKEN" |
+            ssh "${ssh_options[@]}" "$remote" \
+              "set -eu
+               trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+               docker login ghcr.io --username '$GHCR_USERNAME' --password-stdin
+               cd '$VPS_APP_DIR'
+               IMAGE_TAG='$GITHUB_SHA' docker compose pull
+               IMAGE_TAG='$GITHUB_SHA' docker compose up -d --remove-orphans
+               IMAGE_TAG='$GITHUB_SHA' docker compose ps --status running"
