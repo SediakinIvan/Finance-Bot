@@ -23,6 +23,7 @@ from telegram.ext import (
 
 from finance_bot.config import Settings
 from finance_bot.sheets import CategoryOption, SheetsError
+from finance_bot.version import version_text
 
 logger = logging.getLogger(__name__)
 
@@ -150,10 +151,15 @@ async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "Команды:\n"
         "/add — добавить доход или расход\n"
         "/cancel — отменить текущий ввод\n"
+        "/version — показать версию бота\n"
         "/help — показать эту справку\n\n"
         "После заполнения бот покажет строку для подтверждения и добавит её "
         "только в лист «Траты»."
     )
+
+
+async def show_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(version_text())
 
 
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -526,6 +532,7 @@ def register_handlers(application: Application, settings: Settings) -> None:
     application.add_handler(build_conversation(settings))
     authorized = filters.User(user_id=settings.allowed_telegram_user_id)
     application.add_handler(CommandHandler(["start", "help"], start_help, filters=authorized))
+    application.add_handler(CommandHandler("version", show_version, filters=authorized))
     application.add_handler(
         CallbackQueryHandler(stale_callback),
         group=1,

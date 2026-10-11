@@ -5,7 +5,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from telegram.ext import ConversationHandler
 
@@ -14,6 +14,7 @@ from finance_bot.bot import (
     _parse_date,
     _reject_unauthorized_callback,
     build_conversation,
+    show_version,
 )
 from finance_bot.config import Settings
 from finance_bot.sheets import CategoryOption, GoogleSheetsStore, SheetsError, parse_taxonomy_rows
@@ -110,6 +111,20 @@ class AppendOnlyStoreTests(unittest.TestCase):
 
 
 class TelegramHandlerTests(unittest.TestCase):
+    def test_version_command_reports_build_version_and_short_commit(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text)
+        )
+        with patch.dict(
+            "os.environ",
+            {"APP_VERSION": "v1.0.0", "GIT_COMMIT": "abcdef0123456789"},
+            clear=True,
+        ):
+            asyncio.run(show_version(update, SimpleNamespace()))
+
+        reply_text.assert_awaited_once_with("Версия: v1.0.0\nКоммит: abcdef0")
+
     def test_conversation_registers_with_configured_user_allowlist(self) -> None:
         settings = Settings(
             telegram_token="123456:unit-test-token",

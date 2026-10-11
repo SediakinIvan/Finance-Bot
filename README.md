@@ -11,7 +11,7 @@ A private Telegram bot for guided income/expense entry. It **only appends confir
 5. Choose whether to add a note. If yes, type it (up to 1000 characters).
 6. Review the full entry and confirm or cancel.
 
-`/cancel` cancels an in-progress entry; `/help` shows the commands. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets appends are not automatically retried, to avoid duplicate rows; inspect `Траты` before attempting again.
+`/cancel` cancels an in-progress entry; `/help` shows the commands; `/version` reports the deployed release tag and short source commit. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets appends are not automatically retried, to avoid duplicate rows; inspect `Траты` before attempting again.
 
 ## One-time setup
 
@@ -76,7 +76,7 @@ git push -u origin main
 
 Review `git status` before committing. The `.gitignore` excludes `.env`, credentials in `secrets/`, virtual environments, and CSV exports in `data/`; only `data/categories-template.csv` is kept. Do not force-add private files.
 
-GitHub Actions runs unit tests and builds the Docker image on pull requests, pushes to `main`, and manual workflow runs. On a successful push to `main` or a manual run targeting `main`, it publishes the image to GitHub Container Registry (GHCR). VPS deployment with Docker Compose over SSH remains **disabled by default** and will only run after the VPS is prepared and `ENABLE_VPS_DEPLOY` is set to `true`.
+GitHub Actions runs unit tests on pull requests, pushes to `main`, and version tags (`v*`). Pushes to `main` publish and deploy the development image; pushing a version tag also deploys that release image and publishes a GitHub Release.
 
 ### Prepare the Ubuntu 24.04 VPS
 
@@ -104,4 +104,4 @@ Set these **repository variables** under **Settings → Secrets and variables �
 - Optional `VPS_PORT` (default `22`) and `VPS_APP_DIR` (default `/opt/financebot`).
 - `ENABLE_VPS_DEPLOY`: set to `true` only after Docker, the server `.env`, credentials file, and all deployment secrets are ready.
 
-Deployment intentionally fails rather than modifying the server if `.env` or the Google key is missing. After the VPS is prepared and GitHub secrets/variables are set, setting `ENABLE_VPS_DEPLOY=true` allows pushes to `main` and manual workflow runs on `main` to deploy the exact commit image. Pull requests run tests and build the image but never publish or deploy it. The workflow does not bootstrap Docker or create server credentials.
+Deployment intentionally fails rather than modifying the server if `.env` or the Google key is missing. With `ENABLE_VPS_DEPLOY=true`, pushes to `main` and version tags deploy the exact commit image. Pull requests run tests and build the image but never publish or deploy it. The workflow does not bootstrap Docker or create server credentials.
