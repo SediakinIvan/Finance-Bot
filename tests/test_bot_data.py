@@ -16,6 +16,7 @@ from finance_bot.bot import (
     State,
     build_conversation,
     choose_subcategory,
+    receive_amount,
     cancel_current_entry,
     request_optional_note,
     show_recent_transactions,
@@ -213,12 +214,12 @@ class TelegramHandlerTests(unittest.TestCase):
 
             custom_result = asyncio.run(start_add(update, context))
             self.assertEqual(custom_result, State.CUSTOM_DATE)
-            self.assertFalse(context.user_data["pnl_optional_note"])
+            self.assertTrue(context.user_data["pnl_optional_note"])
 
         self.assertEqual(reply_text.await_count, 3)
         self.assertIn("Введите дату", reply_text.await_args_list[-1].args[0])
 
-    def test_preset_date_skips_note_question_but_offers_optional_comment(self) -> None:
+    def test_subcategory_selection_proceeds_to_amount_for_preset_date(self) -> None:
         answer = AsyncMock()
         edit_message_text = AsyncMock()
         update = SimpleNamespace(
@@ -241,7 +242,6 @@ class TelegramHandlerTests(unittest.TestCase):
                 "pnl_category": "Кафе",
                 "pnl_choices": ["Кофе"],
                 "pnl_date": "11.10.2026",
-                "pnl_amount": 250,
                 "pnl_optional_note": True,
             },
             application=SimpleNamespace(bot_data={"settings": settings}),
@@ -249,12 +249,34 @@ class TelegramHandlerTests(unittest.TestCase):
 
         result = asyncio.run(choose_subcategory(update, context))
 
+        self.assertEqual(result, State.AMOUNT)
+        self.assertEqual(context.user_data["pnl_subcategory"], "Кофе")
+        self.assertIn("Введите сумму", edit_message_text.await_args.args[0])
+
+    def test_amount_proceeds_directly_to_confirmation_with_optional_comment(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(text="250", reply_text=reply_text)
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_date": "11.10.2026",
+                "pnl_type": "Расход",
+                "pnl_category": "Кафе",
+                "pnl_subcategory": "Кофе",
+                "pnl_optional_note": True,
+            }
+        )
+
+        result = asyncio.run(receive_amount(update, context))
+
         self.assertEqual(result, State.CONFIRM)
+        self.assertEqual(context.user_data["pnl_amount"], 250)
         self.assertEqual(context.user_data["pnl_note"], "")
-        self.assertIn("Примечание: —", edit_message_text.await_args.args[0])
+        self.assertIn("Примечание: —", reply_text.await_args.args[0])
         callback_data = [
             button.callback_data
-            for row in edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for row in reply_text.await_args.kwargs["reply_markup"].inline_keyboard
             for button in row
         ]
         self.assertIn("note:add", callback_data)

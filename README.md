@@ -8,7 +8,7 @@ A private Telegram bot for guided income/expense entry. It writes confirmed tran
 2. Choose expense or income.
 3. For an expense, choose its category and subcategory. For income, choose its source; the saved category is always `Доход`.
 4. Enter a positive integer RUB amount.
-5. For a custom date, choose whether to add a note; for today/yesterday, optionally press **Добавить комментарий** in the confirmation. Notes are limited to 1000 characters.
+5. Review the transaction and confirm it. Comments are optional: press **Добавить комментарий** in the confirmation if needed (up to 1000 characters).
 6. Review the full entry and confirm or cancel.
 
 The menu buttons have slash-command equivalents: `/cancel` cancels an in-progress entry, `/help` shows the menu, and `/version` reports the deployed release tag and short source commit. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets writes are not automatically retried, to avoid duplicate transactions; inspect `Траты` before attempting again.

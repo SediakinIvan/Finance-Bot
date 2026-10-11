@@ -46,9 +46,8 @@ class State(IntEnum):
     CATEGORY = 2
     SUBCATEGORY = 3
     AMOUNT = 4
-    NOTE_DECISION = 5
-    NOTE_TEXT = 6
-    CONFIRM = 7
+    NOTE_TEXT = 5
+    CONFIRM = 6
 
 
 _FLOW_KEYS = (
@@ -289,7 +288,7 @@ async def _start_add(
         for option in options
     ]
     if preset_day is None:
-        context.user_data["pnl_optional_note"] = False
+        context.user_data["pnl_optional_note"] = True
         await update.effective_message.reply_text(
             "Введите дату в формате ДД.ММ.ГГГГ (например, 10.10.2026).",
             reply_markup=InlineKeyboardMarkup(_cancel_keyboard()),
@@ -435,14 +434,6 @@ async def choose_subcategory(
         if transaction_type == "Доход"
         else context.user_data["pnl_category"]
     )
-    if context.user_data.get("pnl_optional_note"):
-        context.user_data["pnl_note"] = ""
-        await query.edit_message_text(
-            _render_preview(context),
-            reply_markup=_confirmation_keyboard(include_add_note=True),
-        )
-        return State.CONFIRM
-
     await query.edit_message_text(
         f"Подкатегория: {subcategory}\nВведите сумму целым числом рублей:"
     )
@@ -457,36 +448,10 @@ async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return State.AMOUNT
 
     context.user_data["pnl_amount"] = amount
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Да", callback_data="note:yes"),
-                InlineKeyboardButton("Нет", callback_data="note:no"),
-            ],
-            *_cancel_keyboard(),
-        ]
-    )
-    await update.effective_message.reply_text(
-        "Добавить примечание?", reply_markup=keyboard
-    )
-    return State.NOTE_DECISION
-
-
-async def choose_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if await _reject_unauthorized_callback(update, context):
-        return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    if query.data.endswith("yes"):
-        await query.edit_message_text(
-            "Введите примечание (до 1000 символов):",
-            reply_markup=InlineKeyboardMarkup(_cancel_keyboard()),
-        )
-        return State.NOTE_TEXT
-
     context.user_data["pnl_note"] = ""
-    await query.edit_message_text(
-        _render_preview(context), reply_markup=_confirmation_keyboard()
+    await update.effective_message.reply_text(
+        _render_preview(context),
+        reply_markup=_confirmation_keyboard(include_add_note=True),
     )
     return State.CONFIRM
 
@@ -637,9 +602,6 @@ def build_conversation(settings: Settings) -> ConversationHandler:
                 CallbackQueryHandler(choose_subcategory, pattern=r"^sub:[0-9]+$")
             ],
             State.AMOUNT: [MessageHandler(text_input, receive_amount)],
-            State.NOTE_DECISION: [
-                CallbackQueryHandler(choose_note, pattern=r"^note:(yes|no)$")
-            ],
             State.NOTE_TEXT: [MessageHandler(text_input, receive_note)],
             State.CONFIRM: [
                 CallbackQueryHandler(confirm_save, pattern=r"^save:(yes|no)$"),
