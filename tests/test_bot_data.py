@@ -163,8 +163,8 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(
             [[button.text for button in row] for row in keyboard.keyboard],
             [
-                ["добавить транзакцию", "Последние 10 операций"],
-                ["версия", "отменить текущую запись"],
+                ["Добавить транзакцию", "Последние 10 операций"],
+                ["Версия", "Отменить текущую запись"],
             ],
         )
 

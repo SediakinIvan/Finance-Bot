@@ -31,10 +31,10 @@ from finance_bot.sheets import CategoryOption, SheetsError
 from finance_bot.version import version_text
 
 logger = logging.getLogger(__name__)
-ADD_TRANSACTION_BUTTON = "добавить транзакцию"
+ADD_TRANSACTION_BUTTON = "Добавить транзакцию"
 RECENT_TRANSACTIONS_BUTTON = "Последние 10 операций"
-VERSION_BUTTON = "версия"
-CANCEL_TRANSACTION_BUTTON = "отменить текущую запись"
+VERSION_BUTTON = "Версия"
+CANCEL_TRANSACTION_BUTTON = "Отменить текущую запись"
 _MAX_REPLY_TEXT_LENGTH = 2000
 
 
