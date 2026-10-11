@@ -397,7 +397,7 @@ class TelegramHandlerTests(unittest.TestCase):
         ]
         self.assertEqual(
             confirmation_labels,
-            ["Подтвердить", "❌ Отменить"],
+            ["✅ Подтвердить", "❌ Отменить"],
         )
 
     def test_optional_comment_button_prompts_for_comment(self) -> None:
