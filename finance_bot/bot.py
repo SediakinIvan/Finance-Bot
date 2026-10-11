@@ -1,0 +1,532 @@
+"""Telegram conversation for appending transactions to the PnL ledger."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from datetime import date, datetime, timedelta
+from enum import IntEnum
+from typing import Any, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+from finance_bot.config import Settings
+from finance_bot.sheets import CategoryOption, SheetsError
+
+logger = logging.getLogger(__name__)
+
+
+class State(IntEnum):
+    DATE = 0
+    CUSTOM_DATE = 1
+    TYPE = 2
+    CATEGORY = 3
+    SUBCATEGORY = 4
+    AMOUNT = 5
+    NOTE_DECISION = 6
+    NOTE_TEXT = 7
+    CONFIRM = 8
+
+
+_FLOW_KEYS = (
+    "pnl_date",
+    "pnl_type",
+    "pnl_category",
+    "pnl_subcategory",
+    "pnl_amount",
+    "pnl_note",
+    "pnl_options",
+    "pnl_choices",
+)
+
+
+def _forget_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in _FLOW_KEYS:
+        context.user_data.pop(key, None)
+
+
+def _cancel_keyboard() -> list[list[InlineKeyboardButton]]:
+    return [[InlineKeyboardButton("Отмена", callback_data="flow:cancel")]]
+
+
+def _choice_keyboard(
+    choices: Sequence[str], callback_prefix: str, columns: int = 2
+) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(label, callback_data=f"{callback_prefix}:{index}")
+        for index, label in enumerate(choices)
+    ]
+    rows = [buttons[index : index + columns] for index in range(0, len(buttons), columns)]
+    rows.extend(_cancel_keyboard())
+    return InlineKeyboardMarkup(rows)
+
+
+def _format_date(value: date) -> str:
+    return value.strftime("%d.%m.%Y")
+
+
+def _parse_date(value: str) -> date:
+    text = value.strip()
+    for date_format in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, date_format).date()
+        except ValueError:
+            continue
+    raise ValueError("Введите дату в формате ДД.ММ.ГГГГ, например 10.10.2026.")
+
+
+def _parse_amount(value: str) -> int:
+    text = value.strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        raise ValueError("Введите сумму целым числом рублей, без пробелов и копеек.")
+    amount = int(text)
+    if amount <= 0:
+        raise ValueError("Сумма должна быть больше нуля.")
+    return amount
+
+
+def _store(context: ContextTypes.DEFAULT_TYPE) -> Any:
+    return context.application.bot_data["sheets_store"]
+
+
+def _get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
+    return context.application.bot_data["settings"]
+
+
+async def _reject_unauthorized_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """CallbackQueryHandler has no PTB user filter; enforce the allowlist here."""
+    query = update.callback_query
+    settings = _get_settings(context)
+    if query is None or query.from_user.id != settings.allowed_telegram_user_id:
+        if query is not None:
+            await query.answer()
+        return True
+    return False
+
+
+def _timezone(context: ContextTypes.DEFAULT_TYPE) -> ZoneInfo:
+    timezone_name = _get_settings(context).timezone
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Unknown BOT_TIMEZONE: {timezone_name}") from exc
+
+
+def _taxonomy(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, str]]:
+    return context.user_data["pnl_options"]
+
+
+def _render_preview(context: ContextTypes.DEFAULT_TYPE) -> str:
+    kind = context.user_data["pnl_type"]
+    label = "Доход" if kind == "Доход" else "Расход"
+    note = context.user_data.get("pnl_note", "") or "—"
+    return (
+        "Проверьте операцию:\n"
+        f"Дата: {context.user_data['pnl_date']}\n"
+        f"Тип: {label}\n"
+        f"Категория: {context.user_data['pnl_category']}\n"
+        f"Подкатегория: {context.user_data['pnl_subcategory']}\n"
+        f"Сумма: {context.user_data['pnl_amount']} ₽\n"
+        f"Примечание: {note}\n\n"
+        "Записать эту строку в лист «Траты»?"
+    )
+
+
+async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "Команды:\n"
+        "/add — добавить доход или расход\n"
+        "/cancel — отменить текущий ввод\n"
+        "/help — показать эту справку\n\n"
+        "После заполнения бот покажет строку для подтверждения и добавит её "
+        "только в лист «Траты»."
+    )
+
+
+async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    _forget_flow(context)
+    try:
+        options: list[CategoryOption] = await asyncio.to_thread(
+            _store(context).load_taxonomy
+        )
+    except SheetsError as exc:
+        logger.warning("Could not load category choices: %s", exc)
+        await update.effective_message.reply_text(
+            "Не удалось загрузить категории из таблицы. Проверьте лист «Категории» "
+            "и доступ Google, затем попробуйте /add ещё раз."
+        )
+        return ConversationHandler.END
+
+    context.user_data["pnl_options"] = [
+        {
+            "type": option.transaction_type,
+            "category": option.category,
+            "subcategory": option.subcategory,
+        }
+        for option in options
+    ]
+    local_today = datetime.now(_timezone(context)).date()
+    yesterday = local_today - timedelta(days=1)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Сегодня", callback_data="date:today")],
+            [InlineKeyboardButton("Вчера", callback_data="date:yesterday")],
+            [InlineKeyboardButton("Другая дата…", callback_data="date:custom")],
+            *_cancel_keyboard(),
+        ]
+    )
+    await update.effective_message.reply_text(
+        "Выберите дату операции:", reply_markup=keyboard
+    )
+    return State.DATE
+
+
+async def choose_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    choice = query.data.split(":", maxsplit=1)[1]
+    today = datetime.now(_timezone(context)).date()
+    if choice == "custom":
+        await query.edit_message_text(
+            "Введите дату в формате ДД.ММ.ГГГГ (например, 10.10.2026).",
+            reply_markup=InlineKeyboardMarkup(_cancel_keyboard()),
+        )
+        return State.CUSTOM_DATE
+
+    selected = today if choice == "today" else today - timedelta(days=1)
+    context.user_data["pnl_date"] = _format_date(selected)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Расход", callback_data="type:expense"),
+                InlineKeyboardButton("Доход", callback_data="type:income"),
+            ],
+            *_cancel_keyboard(),
+        ]
+    )
+    await query.edit_message_text(
+        f"Дата: {_format_date(selected)}\nВыберите тип операции:",
+        reply_markup=keyboard,
+    )
+    return State.TYPE
+
+
+async def receive_custom_date(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    try:
+        selected = _parse_date(update.effective_message.text)
+    except ValueError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return State.CUSTOM_DATE
+
+    context.user_data["pnl_date"] = _format_date(selected)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Расход", callback_data="type:expense"),
+                InlineKeyboardButton("Доход", callback_data="type:income"),
+            ],
+            *_cancel_keyboard(),
+        ]
+    )
+    await update.effective_message.reply_text(
+        f"Дата: {_format_date(selected)}\nВыберите тип операции:",
+        reply_markup=keyboard,
+    )
+    return State.TYPE
+
+
+async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    transaction_type = "Доход" if query.data.endswith("income") else "Расход"
+    context.user_data["pnl_type"] = transaction_type
+    options = _taxonomy(context)
+
+    if transaction_type == "Доход":
+        choices = sorted(
+            {row["subcategory"] for row in options if row["type"] == "Доход"},
+            key=str.casefold,
+        )
+        if not choices:
+            await query.edit_message_text(
+                "Для доходов нет подкатегорий в листе «Категории»."
+            )
+            return ConversationHandler.END
+        context.user_data["pnl_choices"] = choices
+        await query.edit_message_text(
+            "Выберите источник дохода:",
+            reply_markup=_choice_keyboard(choices, "sub"),
+        )
+        return State.SUBCATEGORY
+
+    choices = sorted(
+        {row["category"] for row in options if row["type"] == "Расход"},
+        key=str.casefold,
+    )
+    if not choices:
+        await query.edit_message_text("Для расходов нет категорий в листе «Категории». ")
+        return ConversationHandler.END
+    context.user_data["pnl_choices"] = choices
+    await query.edit_message_text(
+        "Выберите категорию расхода:",
+        reply_markup=_choice_keyboard(choices, "cat"),
+    )
+    return State.CATEGORY
+
+
+async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(query.data.split(":", maxsplit=1)[1])
+        category = context.user_data["pnl_choices"][index]
+    except (IndexError, KeyError, ValueError):
+        await query.edit_message_text("Кнопка устарела. Начните заново командой /add.")
+        return ConversationHandler.END
+
+    context.user_data["pnl_category"] = category
+    choices = sorted(
+        {
+            row["subcategory"]
+            for row in _taxonomy(context)
+            if row["type"] == "Расход" and row["category"] == category
+        },
+        key=str.casefold,
+    )
+    if not choices:
+        await query.edit_message_text(
+            "Для этой категории нет подкатегорий в листе «Категории». "
+            "Обновите список и начните заново командой /add."
+        )
+        return ConversationHandler.END
+    context.user_data["pnl_choices"] = choices
+    await query.edit_message_text(
+        f"Категория: {category}\nВыберите подкатегорию:",
+        reply_markup=_choice_keyboard(choices, "sub"),
+    )
+    return State.SUBCATEGORY
+
+
+async def choose_subcategory(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    try:
+        index = int(query.data.split(":", maxsplit=1)[1])
+        subcategory = context.user_data["pnl_choices"][index]
+    except (IndexError, KeyError, ValueError):
+        await query.edit_message_text("Кнопка устарела. Начните заново командой /add.")
+        return ConversationHandler.END
+
+    transaction_type = context.user_data["pnl_type"]
+    context.user_data["pnl_subcategory"] = subcategory
+    context.user_data["pnl_category"] = "Доход" if transaction_type == "Доход" else context.user_data["pnl_category"]
+    await query.edit_message_text(
+        f"Подкатегория: {subcategory}\nВведите сумму целым числом рублей:"
+    )
+    return State.AMOUNT
+
+
+async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        amount = _parse_amount(update.effective_message.text)
+    except ValueError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return State.AMOUNT
+
+    context.user_data["pnl_amount"] = amount
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Да", callback_data="note:yes"),
+                InlineKeyboardButton("Нет", callback_data="note:no"),
+            ],
+            *_cancel_keyboard(),
+        ]
+    )
+    await update.effective_message.reply_text(
+        "Добавить примечание?", reply_markup=keyboard
+    )
+    return State.NOTE_DECISION
+
+
+async def choose_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    if query.data.endswith("yes"):
+        await query.edit_message_text(
+            "Введите примечание (до 1000 символов):",
+            reply_markup=InlineKeyboardMarkup(_cancel_keyboard()),
+        )
+        return State.NOTE_TEXT
+
+    context.user_data["pnl_note"] = ""
+    await query.edit_message_text(
+        _render_preview(context), reply_markup=_confirmation_keyboard()
+    )
+    return State.CONFIRM
+
+
+def _confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Подтвердить запись", callback_data="save:yes"),
+                InlineKeyboardButton("Отменить", callback_data="save:no"),
+            ]
+        ]
+    )
+
+
+async def receive_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    note = update.effective_message.text.strip()
+    if not note:
+        await update.effective_message.reply_text("Примечание не может быть пустым.")
+        return State.NOTE_TEXT
+    if len(note) > 1000:
+        await update.effective_message.reply_text(
+            "Слишком длинное примечание. Максимум — 1000 символов."
+        )
+        return State.NOTE_TEXT
+
+    context.user_data["pnl_note"] = note
+    await update.effective_message.reply_text(
+        _render_preview(context), reply_markup=_confirmation_keyboard()
+    )
+    return State.CONFIRM
+
+
+async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    if query.data.endswith("no"):
+        await query.edit_message_text("Операция отменена; таблица не изменена.")
+        _forget_flow(context)
+        return ConversationHandler.END
+
+    row: list[str | int] = [
+        context.user_data["pnl_date"],
+        context.user_data["pnl_category"],
+        context.user_data["pnl_subcategory"],
+        context.user_data["pnl_amount"],
+        context.user_data["pnl_type"],
+        context.user_data.get("pnl_note", ""),
+    ]
+    await query.edit_message_reply_markup(reply_markup=None)
+    try:
+        await asyncio.to_thread(_store(context).append_transaction, row)
+    except SheetsError as exc:
+        logger.warning("Transaction append failed or has an uncertain outcome: %s", exc)
+        await query.message.reply_text(
+            "Не удалось подтвердить результат записи. Чтобы не создать дубль, "
+            "бот не повторял запрос. Проверьте лист «Траты» вручную перед новой попыткой."
+        )
+        _forget_flow(context)
+        return ConversationHandler.END
+
+    await query.edit_message_text("✅ Операция добавлена в лист «Траты».")
+    _forget_flow(context)
+    return ConversationHandler.END
+
+
+async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.callback_query:
+        if await _reject_unauthorized_callback(update, context):
+            return ConversationHandler.END
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "Ввод отменён; таблица не изменена."
+        )
+    elif update.effective_message:
+        await update.effective_message.reply_text("Ввод отменён; таблица не изменена.")
+    _forget_flow(context)
+    return ConversationHandler.END
+
+
+async def stale_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    if query:
+        await query.answer("Эта кнопка уже не активна. Начните с /add.", show_alert=True)
+    return ConversationHandler.END
+
+
+def build_conversation(settings: Settings) -> ConversationHandler:
+    authorized = filters.User(user_id=settings.allowed_telegram_user_id)
+    text_input = filters.TEXT & ~filters.COMMAND & authorized
+    return ConversationHandler(
+        entry_points=[CommandHandler("add", start_add, filters=authorized)],
+        states={
+            State.DATE: [
+                CallbackQueryHandler(choose_date, pattern=r"^date:(today|yesterday|custom)$")
+            ],
+            State.CUSTOM_DATE: [MessageHandler(text_input, receive_custom_date)],
+            State.TYPE: [
+                CallbackQueryHandler(choose_type, pattern=r"^type:(expense|income)$")
+            ],
+            State.CATEGORY: [
+                CallbackQueryHandler(choose_category, pattern=r"^cat:[0-9]+$")
+            ],
+            State.SUBCATEGORY: [
+                CallbackQueryHandler(choose_subcategory, pattern=r"^sub:[0-9]+$")
+            ],
+            State.AMOUNT: [MessageHandler(text_input, receive_amount)],
+            State.NOTE_DECISION: [
+                CallbackQueryHandler(choose_note, pattern=r"^note:(yes|no)$")
+            ],
+            State.NOTE_TEXT: [MessageHandler(text_input, receive_note)],
+            State.CONFIRM: [
+                CallbackQueryHandler(confirm_save, pattern=r"^save:(yes|no)$")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_flow, filters=authorized),
+            CommandHandler("help", start_help, filters=authorized),
+            CallbackQueryHandler(cancel_flow, pattern=r"^flow:cancel$"),
+            CallbackQueryHandler(stale_callback),
+        ],
+        allow_reentry=True,
+        # This flow intentionally mixes command/text updates with inline buttons;
+        # per-user + per-chat isolation is therefore used instead of per-message.
+        per_user=True,
+        per_chat=True,
+    )
+
+
+def register_handlers(application: Application, settings: Settings) -> None:
+    application.add_handler(build_conversation(settings))
+    authorized = filters.User(user_id=settings.allowed_telegram_user_id)
+    application.add_handler(CommandHandler(["start", "help"], start_help, filters=authorized))
+    application.add_handler(
+        CallbackQueryHandler(stale_callback),
+        group=1,
+    )

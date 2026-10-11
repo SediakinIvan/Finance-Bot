@@ -1,0 +1,98 @@
+# Telegram PnL entry bot
+
+A private Telegram bot for guided income/expense entry. It **only appends confirmed rows to the existing `Траты` sheet**; existing formulas and analysis remain in Google Sheets and are not edited. The bot reads button choices from a separate `Категории` sheet. It does not archive, clear, or otherwise update any other tab.
+
+## Current transaction flow
+
+1. `/add` → choose today, yesterday, or enter a date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted).
+2. Choose expense or income.
+3. For an expense, choose its category and subcategory. For income, choose its source; the saved category is always `Доход`.
+4. Enter a positive integer RUB amount.
+5. Choose whether to add a note. If yes, type it (up to 1000 characters).
+6. Review the full entry and confirm or cancel.
+
+`/cancel` cancels an in-progress entry; `/help` shows the commands. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets appends are not automatically retried, to avoid duplicate rows; inspect `Траты` before attempting again.
+
+## One-time setup
+
+### 1. Prepare Google Sheets
+
+- Keep the existing spreadsheet formulas and analysis as they are.
+- Add a tab named `Категории` (or set `GOOGLE_CATEGORIES_SHEET` to another name). Copy the contents of [`data/categories-template.csv`](data/categories-template.csv) into it, including the header row. The template is based on the exported transaction history and analysis; edit choices in the live tab to match your canonical categories.
+- The header row must contain `Тип`, `Категория`, and `Подкатегория`. Each option is one row. Supported types are `Расход` and `Доход`. For income, use `Доход` in both type and category columns; subcategory is the income source.
+- The service account needs **Editor** access to the spreadsheet. The bot reads `Категории` and appends rows to `Траты`; it does not create or modify tabs.
+
+### 2. Create Telegram credentials
+
+- Create a bot with Telegram's `@BotFather` and copy its token.
+- Find your own numeric Telegram user ID (for example, with a trusted user-ID bot). Do not use a username as the allowlist; usernames can change.
+- Do not paste either value into source code or commit them.
+
+### 3. Set up Google service-account access
+
+- In Google Cloud, enable the Google Sheets API and create a service-account key in JSON format.
+- Store the downloaded JSON locally at `secrets/google-service-account.json` (the `secrets/` directory is git-ignored).
+- Share the spreadsheet with the service account's `client_email` as an Editor.
+- Copy the spreadsheet ID from its URL: it is the portion between `/d/` and `/edit`.
+
+### 4. Install and configure (macOS)
+
+From the project directory:
+
+1. Create and activate a virtual environment: `python3 -m venv .venv` then `source .venv/bin/activate`.
+2. Install dependencies: `python -m pip install -r requirements.txt`.
+3. Copy `.env.example` to `.env` and fill in the Telegram token, your numeric Telegram ID, Google service-account JSON path, and spreadsheet ID. Keep `.env` private; it is git-ignored.
+4. Set `BOT_TIMEZONE` to your local IANA timezone if it is not `Europe/Moscow`.
+5. Run `python main.py`. Keep this process running to receive bot updates.
+
+Telegram's long-polling mode does not need a public URL. Only run one polling process for the bot token at a time.
+
+## Verify before live use
+
+- Run automated tests with `python -m unittest discover -s tests`.
+- First test against a copy of the spreadsheet, with the bot token and allowlisted ID configured locally.
+- Verify the `Траты` row has exactly these columns in order: `Дата, Категория, Подкатегория, Сумма, Доход/Расход, Примечание`.
+- Check that formulas recalculate after an appended row. The bot writes the date as text in `ДД.ММ.ГГГГ` format and uses RAW values so the positive integer amount stays numeric.
+
+## Git and CI/CD
+
+The repository uses GitHub Actions to run the unit tests on pull requests and pushes to `main`. A successful push to `main` also deploys the application to a VPS over SSH.
+
+### Connect the project to GitHub
+
+If this directory has not been initialized as a Git repository yet:
+
+```sh
+git init -b main
+```
+
+Create an empty GitHub repository, add it as `origin`, then commit and push the project:
+
+```sh
+git remote add origin git@github.com:OWNER/REPOSITORY.git
+git add .
+git status --short
+git commit -m "Initial project setup"
+git push -u origin main
+```
+
+Review `git status` before committing. The `.gitignore` excludes `.env`, credentials in `secrets/`, virtual environments, and CSV exports in `data/`; only `data/categories-template.csv` is kept. Do not force-add private files.
+
+### Configure GitHub Actions
+
+In GitHub, add these repository variables under **Settings → Secrets and variables → Actions → Variables**:
+
+- `VPS_HOST`: VPS hostname or IP address.
+- `VPS_USER`: SSH account used for deployments.
+- Optional `VPS_PORT` (default `22`), `VPS_APP_DIR` (default `/opt/financebot`), and `VPS_SERVICE_NAME` (default `financebot`).
+
+Under **Settings → Environments**, create an environment named `production`, then add these environment secrets:
+
+- `VPS_SSH_PRIVATE_KEY`: private key for the deployment SSH account.
+- `VPS_KNOWN_HOSTS`: verified `known_hosts` entry for the VPS. Obtain the host key fingerprint through a trusted channel before adding it.
+
+The VPS must already have Python 3, GitHub Actions' SSH public key authorized for the deployment account, and a systemd service named as configured above. The service must run `main.py` from `VPS_APP_DIR`, load its environment configuration, and use the service-account JSON at a protected path on the VPS. Keep `.env` and Google credentials on the server; deployments transfer only files tracked by Git.
+
+The deployment account needs permission to restart and check the configured systemd service without an interactive password (for example, narrowly scoped `sudoers` rules for `systemctl restart` and `systemctl is-active` on that service). The workflow installs requirements, restarts the service, and fails if the service is not active. It never deploys pull-request code.
+
+Once configured, merging or pushing to `main` runs tests first and deploys only if they pass. Protect `main` with a required status check for **Tests** to prevent untested changes from being merged.

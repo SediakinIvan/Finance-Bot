@@ -1,0 +1,87 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: financebot-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  deploy:
+    name: Deploy to VPS
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST }}
+      VPS_USER: ${{ vars.VPS_USER }}
+      VPS_PORT: ${{ vars.VPS_PORT || '22' }}
+      VPS_APP_DIR: ${{ vars.VPS_APP_DIR || '/opt/financebot' }}
+      VPS_SERVICE_NAME: ${{ vars.VPS_SERVICE_NAME || 'financebot' }}
+      VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Deploy over SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${VPS_HOST:?Set the VPS_HOST repository variable}"
+          : "${VPS_USER:?Set the VPS_USER repository variable}"
+          : "${VPS_SSH_PRIVATE_KEY:?Set the VPS_SSH_PRIVATE_KEY environment secret}"
+          : "${VPS_KNOWN_HOSTS:?Set the VPS_KNOWN_HOSTS environment secret}"
+
+          if [[ ! "$VPS_PORT" =~ ^[0-9]+$ ]] ||
+             [[ ! "$VPS_APP_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
+             [[ "$VPS_APP_DIR" =~ (^|/)\.\.(/|$) ]] ||
+             [[ ! "$VPS_SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+            echo "Invalid VPS port, application directory, or service name." >&2
+            exit 1
+          fi
+
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"
+
+          remote_command="mkdir -p '$VPS_APP_DIR' &&
+            tar -xf - -C '$VPS_APP_DIR' &&
+            cd '$VPS_APP_DIR' &&
+            if [ ! -x .venv/bin/python ]; then python3 -m venv .venv; fi &&
+            .venv/bin/python -m pip install -r requirements.txt &&
+            sudo -n systemctl restart '$VPS_SERVICE_NAME' &&
+            sudo -n systemctl is-active --quiet '$VPS_SERVICE_NAME'"
+
+          git archive --format=tar "$GITHUB_SHA" |
+            ssh -i "$RUNNER_TEMP/ssh/key" \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+              -p "$VPS_PORT" \
+              "$VPS_USER@$VPS_HOST" "$remote_command"

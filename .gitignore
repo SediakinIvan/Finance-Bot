@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+secrets/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+
+# Keep the category template; transaction exports contain private financial data.
+data/*.csv
+!data/categories-template.csv
