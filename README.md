@@ -54,9 +54,7 @@ Telegram's long-polling mode does not need a public URL. Only run one polling pr
 - Verify the `Траты` row has exactly these columns in order: `Дата, Категория, Подкатегория, Сумма, Доход/Расход, Примечание`.
 - Check that formulas recalculate after an appended row. The bot writes the date as text in `ДД.ММ.ГГГГ` format and uses RAW values so the positive integer amount stays numeric.
 
-## Git and CI/CD
-
-The repository uses GitHub Actions to run the unit tests on pull requests and pushes to `main`. A successful push to `main` also deploys the application to a VPS over SSH.
+## Git and CI
 
 ### Connect the project to GitHub
 
@@ -78,21 +76,4 @@ git push -u origin main
 
 Review `git status` before committing. The `.gitignore` excludes `.env`, credentials in `secrets/`, virtual environments, and CSV exports in `data/`; only `data/categories-template.csv` is kept. Do not force-add private files.
 
-### Configure GitHub Actions
-
-In GitHub, add these repository variables under **Settings → Secrets and variables → Actions → Variables**:
-
-- `VPS_HOST`: VPS hostname or IP address.
-- `VPS_USER`: SSH account used for deployments.
-- Optional `VPS_PORT` (default `22`), `VPS_APP_DIR` (default `/opt/financebot`), and `VPS_SERVICE_NAME` (default `financebot`).
-
-Under **Settings → Environments**, create an environment named `production`, then add these environment secrets:
-
-- `VPS_SSH_PRIVATE_KEY`: private key for the deployment SSH account.
-- `VPS_KNOWN_HOSTS`: verified `known_hosts` entry for the VPS. Obtain the host key fingerprint through a trusted channel before adding it.
-
-The VPS must already have Python 3, GitHub Actions' SSH public key authorized for the deployment account, and a systemd service named as configured above. The service must run `main.py` from `VPS_APP_DIR`, load its environment configuration, and use the service-account JSON at a protected path on the VPS. Keep `.env` and Google credentials on the server; deployments transfer only files tracked by Git.
-
-The deployment account needs permission to restart and check the configured systemd service without an interactive password (for example, narrowly scoped `sudoers` rules for `systemctl restart` and `systemctl is-active` on that service). The workflow installs requirements, restarts the service, and fails if the service is not active. It never deploys pull-request code.
-
-Once configured, merging or pushing to `main` runs tests first and deploys only if they pass. Protect `main` with a required status check for **Tests** to prevent untested changes from being merged.
+GitHub Actions runs the unit tests on pull requests and pushes to `main`. **Deployment is not configured yet**: the project does not have a container image, VPS connection, or server-side runtime setup. Pushes to `main` only run CI and do not attempt to deploy. Set up and test the VPS runtime before adding a deployment job. Keep `.env` and Google credentials out of Git; configure them securely on the server.
