@@ -312,11 +312,16 @@ def _analytics_period(analytics: MonthlyAnalytics) -> str:
 
 
 def _monthly_analytics_text(analytics: MonthlyAnalytics) -> str:
+    categories = "\n".join(
+        f"• {value.label}: {_format_rubles(value.amount)} ₽"
+        for value in analytics.categories
+    )
     return (
         f"Аналитика за {_analytics_period(analytics)}:\n"
         f"Расходы: {_format_rubles(analytics.expenses)} ₽\n"
         f"Доход: {_format_rubles(analytics.income)} ₽\n"
-        f"Остаток на текущий момент: {_format_rubles(analytics.balance)} ₽"
+        f"Остаток на текущий момент: {_format_rubles(analytics.balance)} ₽\n\n"
+        f"Траты по категориям:\n{categories}"
     )
 
 

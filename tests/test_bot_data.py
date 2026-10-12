@@ -350,7 +350,10 @@ class TelegramHandlerTests(unittest.TestCase):
             27457,
             160516,
             133059,
-            (AnalyticsValue("Еда офис", 4554),),
+            (
+                AnalyticsValue("Еда офис", 4554),
+                AnalyticsValue("Кафе/Рестораны", 6946),
+            ),
         )
         store = SimpleNamespace(get_monthly_analytics=lambda: analytics)
         update = SimpleNamespace(
@@ -370,7 +373,10 @@ class TelegramHandlerTests(unittest.TestCase):
             "Аналитика за октябрь 2026:\n"
             "Расходы: 27 457 ₽\n"
             "Доход: 160 516 ₽\n"
-            "Остаток на текущий момент: 133 059 ₽"
+            "Остаток на текущий момент: 133 059 ₽\n\n"
+            "Траты по категориям:\n"
+            "• Еда офис: 4 554 ₽\n"
+            "• Кафе/Рестораны: 6 946 ₽"
         )
         reply_photo.assert_awaited_once_with(photo=b"chart")
         chart.assert_called_once_with(
