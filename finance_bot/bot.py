@@ -147,8 +147,11 @@ def _parse_amount(value: str) -> int:
     return amount
 
 
-def _store(context: ContextTypes.DEFAULT_TYPE) -> Any:
-    return context.application.bot_data["sheets_store"]
+def _store(context: ContextTypes.DEFAULT_TYPE, update: Update) -> Any:
+    user = update.effective_user
+    if user is None:
+        raise RuntimeError("Cannot select a spreadsheet without a Telegram user.")
+    return context.application.bot_data["sheets_stores"][user.id]
 
 
 def _get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
@@ -161,7 +164,13 @@ async def _reject_unauthorized_callback(
     """CallbackQueryHandler has no PTB user filter; enforce the allowlist here."""
     query = update.callback_query
     settings = _get_settings(context)
-    if query is None or query.from_user.id != settings.allowed_telegram_user_id:
+    chat = update.effective_chat
+    if (
+        query is None
+        or query.from_user.id not in settings.authorized_telegram_user_ids
+        or chat is None
+        or chat.type != "private"
+    ):
         if query is not None:
             await query.answer()
         return True
@@ -290,7 +299,7 @@ async def show_recent_transactions(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     try:
-        rows = await asyncio.to_thread(_store(context).get_recent_transactions)
+        rows = await asyncio.to_thread(_store(context, update).get_recent_transactions)
     except SheetsError as exc:
         logger.warning("Could not read recent transactions: %s", exc)
         await update.effective_message.reply_text(
@@ -339,7 +348,7 @@ def _category_analytics_text(analytics: CategoryAnalytics, period: str) -> str:
 
 async def show_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        analytics = await asyncio.to_thread(_store(context).get_monthly_analytics)
+        analytics = await asyncio.to_thread(_store(context, update).get_monthly_analytics)
     except SheetsError as exc:
         logger.warning("Could not read monthly analytics: %s", exc)
         await update.effective_message.reply_text(
@@ -387,7 +396,7 @@ async def show_category_analytics(
     category = _ANALYTICS_CATEGORIES[category_index]
     try:
         analytics = await asyncio.to_thread(
-            _store(context).get_category_analytics, category
+            _store(context, update).get_category_analytics, category
         )
     except SheetsError as exc:
         logger.warning("Could not read analytics for %s: %s", category, exc)
@@ -415,7 +424,7 @@ async def _start_add(
     _forget_flow(context)
     try:
         options: list[CategoryOption] = await asyncio.to_thread(
-            _store(context).load_taxonomy
+            _store(context, update).load_taxonomy
         )
     except SheetsError as exc:
         logger.warning("Could not load category choices: %s", exc)
@@ -655,7 +664,7 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     ]
     await query.edit_message_reply_markup(reply_markup=None)
     try:
-        await asyncio.to_thread(_store(context).append_transaction, row)
+        await asyncio.to_thread(_store(context, update).append_transaction, row)
     except SheetsError as exc:
         logger.warning("Transaction append failed or has an uncertain outcome: %s", exc)
         await query.message.reply_text(
@@ -703,7 +712,10 @@ async def stale_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def build_conversation(settings: Settings) -> ConversationHandler:
-    authorized = filters.User(user_id=settings.allowed_telegram_user_id)
+    authorized = (
+        filters.User(user_id=settings.authorized_telegram_user_ids)
+        & filters.ChatType.PRIVATE
+    )
     main_menu_button = filters.Regex(
         rf"^({re.escape(ADD_TRANSACTION_BUTTON)}|"
         rf"{re.escape(ADD_TODAY_TRANSACTION_BUTTON)}|"
@@ -773,7 +785,10 @@ def build_conversation(settings: Settings) -> ConversationHandler:
 
 
 def register_handlers(application: Application, settings: Settings) -> None:
-    authorized = filters.User(user_id=settings.allowed_telegram_user_id)
+    authorized = (
+        filters.User(user_id=settings.authorized_telegram_user_ids)
+        & filters.ChatType.PRIVATE
+    )
     application.add_handler(
         MessageHandler(
             filters.Regex(rf"^{re.escape(ANALYTICS_BUTTON)}$") & authorized,

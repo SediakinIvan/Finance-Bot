@@ -23,16 +23,22 @@ def main() -> None:
 	except ConfigurationError as exc:
 		raise SystemExit(f"Configuration error: {exc}") from exc
 
-	store = GoogleSheetsStore(
-		credentials_file=str(settings.google_credentials_file),
-		spreadsheet_id=settings.spreadsheet_id,
-		transactions_sheet=settings.transactions_sheet,
-		categories_sheet=settings.categories_sheet,
-		analytics_sheet=settings.analytics_sheet,
-	)
+	stores = {
+		user_id: GoogleSheetsStore(
+			credentials_file=str(settings.google_credentials_file),
+			spreadsheet_id=spreadsheet_id,
+			transactions_sheet=settings.transactions_sheet,
+			categories_sheet=settings.categories_sheet,
+			analytics_sheet=settings.analytics_sheet,
+		)
+		for user_id, spreadsheet_id in {
+			settings.allowed_telegram_user_id: settings.spreadsheet_id,
+			**settings.additional_user_sheets,
+		}.items()
+	}
 	application = Application.builder().token(settings.telegram_token).build()
 	application.bot_data["settings"] = settings
-	application.bot_data["sheets_store"] = store
+	application.bot_data["sheets_stores"] = stores
 	register_handlers(application, settings)
 	logging.getLogger(__name__).info("Starting Telegram bot polling")
 	application.run_polling(allowed_updates=None)

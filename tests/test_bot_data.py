@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -13,6 +15,7 @@ from finance_bot.bot import (
     _parse_amount,
     _parse_date,
     _reject_unauthorized_callback,
+    _store,
     show_analytics,
     show_category_analytics,
     show_category_analytics_choices,
@@ -31,7 +34,7 @@ from finance_bot.bot import (
     start_help,
     show_version,
 )
-from finance_bot.config import Settings
+from finance_bot.config import ConfigurationError, Settings
 from finance_bot.charts import render_donut_chart
 from finance_bot.analytics import (
     AnalyticsError,
@@ -104,6 +107,55 @@ ANALYTICS_ROWS = [
     ["", "", "", "", "", "", "", "", "", "Самокаты", "170"],
     ["", "", "", "", "", "", "", "", "", "Такси", "1116"],
 ]
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_loads_additional_telegram_user_spreadsheet_mappings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            credentials_file = Path(temporary_directory) / "service-account.json"
+            credentials_file.touch()
+            environment = {
+                "TELEGRAM_BOT_TOKEN": "123456:unit-test-token",
+                "TELEGRAM_ALLOWED_USER_ID": "123456",
+                "GOOGLE_CREDENTIALS_FILE": str(credentials_file),
+                "GOOGLE_SHEET_ID": "owner-sheet",
+                "TELEGRAM_USER_SHEETS": (
+                    "809663270:friend-sheet, 987654321:another-sheet"
+                ),
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                settings = Settings.from_environment()
+
+        self.assertEqual(
+            settings.authorized_telegram_user_ids,
+            frozenset({123456, 809663270, 987654321}),
+        )
+        self.assertEqual(settings.spreadsheet_id_for_user(123456), "owner-sheet")
+        self.assertEqual(settings.spreadsheet_id_for_user(809663270), "friend-sheet")
+        with self.assertRaises(ConfigurationError):
+            settings.spreadsheet_id_for_user(111)
+
+    def test_rejects_duplicate_or_malformed_user_sheet_mappings(self) -> None:
+        for mappings in (
+            "123456:owner-sheet",
+            "809663270",
+            "809663270:,809663270:friend-sheet",
+            "809663270:owner-sheet",
+            "809663270:friend-sheet,987654321:friend-sheet",
+        ):
+            with self.subTest(mappings=mappings), tempfile.TemporaryDirectory() as tmp:
+                credentials_file = Path(tmp) / "service-account.json"
+                credentials_file.touch()
+                environment = {
+                    "TELEGRAM_BOT_TOKEN": "123456:unit-test-token",
+                    "TELEGRAM_ALLOWED_USER_ID": "123456",
+                    "GOOGLE_CREDENTIALS_FILE": str(credentials_file),
+                    "GOOGLE_SHEET_ID": "owner-sheet",
+                    "TELEGRAM_USER_SHEETS": mappings,
+                }
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaises(ConfigurationError):
+                        Settings.from_environment()
 
 
 class TaxonomyTests(unittest.TestCase):
@@ -391,13 +443,16 @@ class TelegramHandlerTests(unittest.TestCase):
         )
         store = SimpleNamespace(get_monthly_analytics=lambda: analytics)
         update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=123456),
             effective_message=SimpleNamespace(
                 reply_text=reply_text,
                 reply_photo=reply_photo,
             )
         )
         context = SimpleNamespace(
-            application=SimpleNamespace(bot_data={"sheets_store": store})
+            application=SimpleNamespace(
+                bot_data={"sheets_stores": {123456: store}}
+            )
         )
 
         with patch("finance_bot.bot.render_donut_chart", return_value=b"chart") as chart:
@@ -466,11 +521,16 @@ class TelegramHandlerTests(unittest.TestCase):
                 answer=answer,
                 edit_message_text=edit_message_text,
             ),
+            effective_chat=SimpleNamespace(type="private"),
+            effective_user=SimpleNamespace(id=123456),
             effective_message=SimpleNamespace(reply_photo=reply_photo),
         )
         context = SimpleNamespace(
             application=SimpleNamespace(
-                bot_data={"settings": settings, "sheets_store": store}
+                bot_data={
+                    "settings": settings,
+                    "sheets_stores": {123456: store},
+                }
             )
         )
 
@@ -505,11 +565,15 @@ class TelegramHandlerTests(unittest.TestCase):
         context = SimpleNamespace(
             user_data={},
             application=SimpleNamespace(
-                bot_data={"settings": settings, "sheets_store": store}
+                bot_data={
+                    "settings": settings,
+                    "sheets_stores": {123456: store},
+                }
             ),
         )
         reply_text = AsyncMock()
         update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=123456),
             effective_message=SimpleNamespace(reply_text=reply_text)
         )
 
@@ -543,7 +607,8 @@ class TelegramHandlerTests(unittest.TestCase):
                 data="sub:0",
                 answer=answer,
                 edit_message_text=edit_message_text,
-            )
+            ),
+            effective_chat=SimpleNamespace(type="private"),
         )
         settings = Settings(
             telegram_token="123456:unit-test-token",
@@ -577,7 +642,8 @@ class TelegramHandlerTests(unittest.TestCase):
                 data="cat:0",
                 answer=answer,
                 edit_message_text=edit_message_text,
-            )
+            ),
+            effective_chat=SimpleNamespace(type="private"),
         )
         settings = Settings(
             telegram_token="123456:unit-test-token",
@@ -613,7 +679,8 @@ class TelegramHandlerTests(unittest.TestCase):
                 data="cat:0",
                 answer=answer,
                 edit_message_text=edit_message_text,
-            )
+            ),
+            effective_chat=SimpleNamespace(type="private"),
         )
         settings = Settings(
             telegram_token="123456:unit-test-token",
@@ -649,7 +716,8 @@ class TelegramHandlerTests(unittest.TestCase):
                 data="type:income",
                 answer=answer,
                 edit_message_text=edit_message_text,
-            )
+            ),
+            effective_chat=SimpleNamespace(type="private"),
         )
         settings = Settings(
             telegram_token="123456:unit-test-token",
@@ -722,7 +790,8 @@ class TelegramHandlerTests(unittest.TestCase):
                 data="note:add",
                 answer=answer,
                 edit_message_text=edit_message_text,
-            )
+            ),
+            effective_chat=SimpleNamespace(type="private"),
         )
         settings = Settings(
             telegram_token="123456:unit-test-token",
@@ -791,10 +860,13 @@ class TelegramHandlerTests(unittest.TestCase):
         row = ["10.10.2026", "Кафе", "Кофе", "250", "Расход", "с коллегой"]
         store = SimpleNamespace(get_recent_transactions=lambda: [row])
         update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=123456),
             effective_message=SimpleNamespace(reply_text=reply_text)
         )
         context = SimpleNamespace(
-            application=SimpleNamespace(bot_data={"sheets_store": store})
+            application=SimpleNamespace(
+                bot_data={"sheets_stores": {123456: store}}
+            )
         )
 
         asyncio.run(show_recent_transactions(update, context))
@@ -826,13 +898,75 @@ class TelegramHandlerTests(unittest.TestCase):
         update = SimpleNamespace(
             callback_query=SimpleNamespace(
                 from_user=SimpleNamespace(id=999), answer=answer
-            )
+            ),
+            effective_chat=SimpleNamespace(type="private"),
         )
         settings = Settings(
             telegram_token="123456:unit-test-token",
             allowed_telegram_user_id=123456,
             google_credentials_file=Path("service-account.json"),
             spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(bot_data={"settings": settings})
+        )
+
+        rejected = asyncio.run(_reject_unauthorized_callback(update, context))
+
+        self.assertTrue(rejected)
+        answer.assert_awaited_once_with()
+
+    def test_additional_user_routes_to_own_spreadsheet_and_is_authorized(self) -> None:
+        answer = AsyncMock()
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="owner-sheet",
+            additional_user_sheets={809663270: "friend-sheet"},
+        )
+        owner_store = object()
+        friend_store = object()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=809663270),
+                answer=answer,
+            ),
+            effective_chat=SimpleNamespace(type="private"),
+            effective_user=SimpleNamespace(id=809663270),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "settings": settings,
+                    "sheets_stores": {
+                        123456: owner_store,
+                        809663270: friend_store,
+                    },
+                }
+            )
+        )
+
+        rejected = asyncio.run(_reject_unauthorized_callback(update, context))
+
+        self.assertFalse(rejected)
+        self.assertIs(_store(context, update), friend_store)
+        answer.assert_not_awaited()
+
+    def test_rejects_callback_from_authorized_user_in_group_chat(self) -> None:
+        answer = AsyncMock()
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="owner-sheet",
+        )
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                answer=answer,
+            ),
+            effective_chat=SimpleNamespace(type="group"),
         )
         context = SimpleNamespace(
             application=SimpleNamespace(bot_data={"settings": settings})
