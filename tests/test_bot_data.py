@@ -318,6 +318,40 @@ class AnalyticsTests(unittest.TestCase):
 
         self.assertEqual(chart.read(8), b"\x89PNG\r\n\x1a\n")
 
+    def test_donut_chart_sorts_values_and_keeps_legend_inside_image(self) -> None:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        original_print_png = FigureCanvasAgg.print_png
+        layout: dict[str, object] = {}
+
+        def capture_chart_layout(canvas, image, *args, **kwargs) -> None:
+            canvas.draw()
+            legend = canvas.figure.legends[0]
+            layout["labels"] = [text.get_text() for text in legend.get_texts()]
+            layout["legend_right"] = legend.get_window_extent(
+                canvas.get_renderer()
+            ).x1
+            layout["figure_right"] = canvas.figure.bbox.x1
+            original_print_png(canvas, image, *args, **kwargs)
+
+        values = (
+            AnalyticsValue("Категория с длинным названием номер один", 1500),
+            AnalyticsValue("Категория с длинным названием номер два", 4500),
+            AnalyticsValue("Категория с длинным названием номер три", 3000),
+        )
+        with patch.object(FigureCanvasAgg, "print_png", capture_chart_layout):
+            render_donut_chart("Траты по категориям", values)
+
+        self.assertEqual(
+            layout["labels"],
+            [
+                "Категория с длинным названием номер два: 4 500 ₽ (50,0%)",
+                "Категория с длинным названием номер три: 3 000 ₽ (33,3%)",
+                "Категория с длинным названием номер один: 1 500 ₽ (16,7%)",
+            ],
+        )
+        self.assertLessEqual(layout["legend_right"], layout["figure_right"])
+
 
 class TelegramHandlerTests(unittest.TestCase):
     def test_help_shows_requested_persistent_menu_buttons(self) -> None:
