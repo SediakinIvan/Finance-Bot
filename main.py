@@ -28,6 +28,7 @@ def main() -> None:
 		spreadsheet_id=settings.spreadsheet_id,
 		transactions_sheet=settings.transactions_sheet,
 		categories_sheet=settings.categories_sheet,
+		analytics_sheet=settings.analytics_sheet,
 	)
 	application = Application.builder().token(settings.telegram_token).build()
 	application.bot_data["settings"] = settings

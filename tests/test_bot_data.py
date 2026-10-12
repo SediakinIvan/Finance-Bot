@@ -13,6 +13,9 @@ from finance_bot.bot import (
     _parse_amount,
     _parse_date,
     _reject_unauthorized_callback,
+    show_analytics,
+    show_category_analytics,
+    show_category_analytics_choices,
     State,
     build_conversation,
     choose_category,
@@ -29,7 +32,78 @@ from finance_bot.bot import (
     show_version,
 )
 from finance_bot.config import Settings
+from finance_bot.charts import render_donut_chart
+from finance_bot.analytics import (
+    AnalyticsError,
+    AnalyticsValue,
+    CategoryAnalytics,
+    MonthlyAnalytics,
+    parse_category_analytics,
+    parse_monthly_analytics,
+)
 from finance_bot.sheets import CategoryOption, GoogleSheetsStore, SheetsError, parse_taxonomy_rows
+
+
+ANALYTICS_ROWS = [
+    [
+        "ТЕКУЩАЯ АНАЛИТИКА",
+        "",
+        "Месяц:",
+        "10",
+        "",
+        "",
+        "Подкатегории: еда офис",
+        "",
+        "",
+        "",
+        "Подкатегории: Кафе/Рестораны",
+    ],
+    [
+        "",
+        "",
+        "Год:",
+        "2026",
+        "",
+        "",
+        "Подкатегория",
+        "Сумма",
+        "",
+        "",
+        "Подкатегория",
+        "Сумма",
+    ],
+    ["Расходы за месяц", "р.27 457", "", "", "", "", "Столовая", "3381", "", "", "Кафе", "2706"],
+    ["Доход за месяц", "р.160 516", "", "", "", "", "Самокат", "686", "", "", "Ресторан", "3070"],
+    [
+        "Остаток на текущий момент",
+        "р.133 059",
+        "",
+        "",
+        "",
+        "",
+        "Сладкое",
+        "487",
+        "",
+        "",
+        "Фастфуд",
+        "1170",
+    ],
+    ["", "", "", "", "", "", "", "", "", "", "", ""],
+    ["Траты по категориям (за месяц)"],
+    ["Категория", "Сумма", "Процент от трат"],
+    ["Еда офис", "р.4 554", "16,59%"],
+    ["Кафе/Рестораны", "р.6 946", "25,30%"],
+    ["Транспорт", "р.2 048", "7,46%"],
+    ["Продукты", "р.4 112", "14,98%"],
+    ["", "", "", "", "", "Подкатегории: продукты", "", "", "", "Подкатегории: Транспорт"],
+    ["", "", "", "", "", "Подкатегория", "Сумма", "", "", "Подкатегория", "Сумма"],
+    ["", "", "", "", "", "Магазин", "1900", "", "", "Штрафы", "762"],
+    ["", "", "", "", "", "Доставка", "1402", "", "", "Бенз", "0"],
+    ["", "", "", "", "", "Перекус", "810", "", "", "Общественный", "0"],
+    ["", "", "", "", "", "Готовая еда", "0", "", "", "Платка", "0"],
+    ["", "", "", "", "", "", "", "", "", "Самокаты", "170"],
+    ["", "", "", "", "", "", "", "", "", "Такси", "1116"],
+]
 
 
 class TaxonomyTests(unittest.TestCase):
@@ -157,6 +231,94 @@ class TransactionsStoreTests(unittest.TestCase):
         self.assertEqual(worksheet.range_name, "A2:F20")
 
 
+class AnalyticsTests(unittest.TestCase):
+    def test_parses_monthly_summary_and_category_totals(self) -> None:
+        analytics = parse_monthly_analytics(ANALYTICS_ROWS)
+
+        self.assertEqual(analytics.month, 10)
+        self.assertEqual(analytics.year, 2026)
+        self.assertEqual(analytics.expenses, 27457)
+        self.assertEqual(analytics.income, 160516)
+        self.assertEqual(analytics.balance, 133059)
+        self.assertEqual(
+            analytics.categories,
+            (
+                AnalyticsValue("Еда офис", 4554),
+                AnalyticsValue("Кафе/Рестораны", 6946),
+                AnalyticsValue("Транспорт", 2048),
+                AnalyticsValue("Продукты", 4112),
+            ),
+        )
+
+    def test_parses_selected_category_subcategories_case_insensitively(self) -> None:
+        analytics = parse_category_analytics(ANALYTICS_ROWS, "ЕДА ОФИС")
+
+        self.assertEqual(analytics.category, "ЕДА ОФИС")
+        self.assertEqual(analytics.month, 10)
+        self.assertEqual(analytics.year, 2026)
+        self.assertEqual(analytics.total, 4554)
+        self.assertEqual(
+            analytics.subcategories,
+            (
+                AnalyticsValue("Столовая", 3381),
+                AnalyticsValue("Самокат", 686),
+                AnalyticsValue("Сладкое", 487),
+            ),
+        )
+
+    def test_parses_subcategories_for_all_requested_categories(self) -> None:
+        expected = {
+            "Еда офис": ("Столовая", "Самокат", "Сладкое"),
+            "Кафе/Рестораны": ("Кафе", "Ресторан", "Фастфуд"),
+            "Транспорт": ("Штрафы", "Бенз", "Общественный", "Платка", "Самокаты", "Такси"),
+            "Продукты": ("Магазин", "Доставка", "Перекус", "Готовая еда"),
+        }
+
+        for category, subcategory_names in expected.items():
+            with self.subTest(category=category):
+                analytics = parse_category_analytics(ANALYTICS_ROWS, category)
+                self.assertEqual(
+                    tuple(value.label for value in analytics.subcategories),
+                    subcategory_names,
+                )
+
+    def test_rejects_missing_or_invalid_analytics_values(self) -> None:
+        with self.assertRaises(AnalyticsError):
+            parse_monthly_analytics([])
+        with self.assertRaises(AnalyticsError):
+            parse_category_analytics(ANALYTICS_ROWS, "Неизвестная категория")
+
+    def test_store_reads_configured_analytics_sheet(self) -> None:
+        calls: list[str] = []
+
+        class FakeWorksheet:
+            def get_all_values(self) -> list[list[str]]:
+                return ANALYTICS_ROWS
+
+        class FakeSpreadsheet:
+            def worksheet(self, name: str) -> FakeWorksheet:
+                calls.append(name)
+                return FakeWorksheet()
+
+        store = GoogleSheetsStore(
+            "unused.json",
+            "unused-id",
+            analytics_sheet="Моя аналитика",
+        )
+        store._spreadsheet = FakeSpreadsheet()
+
+        self.assertEqual(store.get_monthly_analytics().month, 10)
+        self.assertEqual(calls, ["Моя аналитика"])
+
+    def test_renders_donut_chart_as_png(self) -> None:
+        chart = render_donut_chart(
+            "Траты по категориям",
+            (AnalyticsValue("Еда офис", 4554), AnalyticsValue("Транспорт", 2048)),
+        )
+
+        self.assertEqual(chart.read(8), b"\x89PNG\r\n\x1a\n")
+
+
 class TelegramHandlerTests(unittest.TestCase):
     def test_help_shows_requested_persistent_menu_buttons(self) -> None:
         reply_text = AsyncMock()
@@ -174,8 +336,119 @@ class TelegramHandlerTests(unittest.TestCase):
             [
                 ["Добавить транзакцию (сегодня)", "Добавить транзакцию (вчера)"],
                 ["Добавить транзакцию", "Последние 10 операций"],
+                ["Аналитика", "Аналитика по категориям"],
                 ["Версия", "Отменить текущую запись"],
             ],
+        )
+
+    def test_monthly_analytics_sends_summary_and_chart(self) -> None:
+        reply_text = AsyncMock()
+        reply_photo = AsyncMock()
+        analytics = MonthlyAnalytics(
+            10,
+            2026,
+            27457,
+            160516,
+            133059,
+            (AnalyticsValue("Еда офис", 4554),),
+        )
+        store = SimpleNamespace(get_monthly_analytics=lambda: analytics)
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(
+                reply_text=reply_text,
+                reply_photo=reply_photo,
+            )
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(bot_data={"sheets_store": store})
+        )
+
+        with patch("finance_bot.bot.render_donut_chart", return_value=b"chart") as chart:
+            asyncio.run(show_analytics(update, context))
+
+        reply_text.assert_awaited_once_with(
+            "Аналитика за октябрь 2026:\n"
+            "Расходы: 27 457 ₽\n"
+            "Доход: 160 516 ₽\n"
+            "Остаток на текущий момент: 133 059 ₽"
+        )
+        reply_photo.assert_awaited_once_with(photo=b"chart")
+        chart.assert_called_once_with(
+            "Траты по категориям · октябрь 2026",
+            analytics.categories,
+        )
+
+    def test_category_analytics_offers_requested_categories(self) -> None:
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text)
+        )
+
+        asyncio.run(show_category_analytics_choices(update, SimpleNamespace()))
+
+        keyboard = reply_text.await_args.kwargs["reply_markup"]
+        self.assertEqual(
+            [
+                (button.text, button.callback_data)
+                for row in keyboard.inline_keyboard
+                for button in row
+            ],
+            [
+                ("Еда офис", "analytics:category:0"),
+                ("Кафе/Рестораны", "analytics:category:1"),
+                ("Транспорт", "analytics:category:2"),
+                ("Продукты", "analytics:category:3"),
+            ],
+        )
+
+    def test_category_analytics_returns_values_and_chart(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        reply_photo = AsyncMock()
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        category = CategoryAnalytics(
+            "Еда офис",
+            10,
+            2026,
+            4554,
+            (AnalyticsValue("Столовая", 3381), AnalyticsValue("Самокат", 686)),
+        )
+        store = SimpleNamespace(get_category_analytics=lambda _value: category)
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="analytics:category:0",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            ),
+            effective_message=SimpleNamespace(reply_photo=reply_photo),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={"settings": settings, "sheets_store": store}
+            )
+        )
+
+        with patch("finance_bot.bot.render_donut_chart", return_value=b"chart") as chart:
+            asyncio.run(show_category_analytics(update, context))
+
+        answer.assert_awaited_once_with()
+        edit_message_text.assert_awaited_once_with(
+            "Аналитика по категории «Еда офис» за октябрь 2026:\n"
+            "Всего: 4 554 ₽\n"
+            "Подкатегории:\n"
+            "• Столовая: 3 381 ₽\n"
+            "• Самокат: 686 ₽"
+        )
+        reply_photo.assert_awaited_once_with(photo=b"chart")
+        chart.assert_called_once_with(
+            "Распределение · Еда офис · октябрь 2026",
+            category.subcategories,
         )
 
     def test_date_buttons_prefill_today_and_yesterday(self) -> None:

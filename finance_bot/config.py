@@ -19,6 +19,7 @@ class Settings:
     spreadsheet_id: str
     transactions_sheet: str = "Траты"
     categories_sheet: str = "Категории"
+    analytics_sheet: str = "Аналитика"
     timezone: str = "Europe/Moscow"
 
     @classmethod
@@ -55,5 +56,6 @@ class Settings:
             spreadsheet_id=required["GOOGLE_SHEET_ID"],
             transactions_sheet=os.getenv("GOOGLE_TRANSACTIONS_SHEET", "Траты").strip(),
             categories_sheet=os.getenv("GOOGLE_CATEGORIES_SHEET", "Категории").strip(),
+            analytics_sheet=os.getenv("GOOGLE_ANALYTICS_SHEET", "Аналитика").strip(),
             timezone=os.getenv("BOT_TIMEZONE", "Europe/Moscow").strip(),
         )

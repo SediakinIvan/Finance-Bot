@@ -4,7 +4,7 @@ A private Telegram bot for guided income/expense entry. It writes confirmed tran
 
 ## Current transaction flow
 
-1. Choose **Добавить транзакцию (сегодня)** or **Добавить транзакцию (вчера)** to use that date directly, or choose **Добавить транзакцию** (or `/add`) to enter another date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted). Today/yesterday flows skip the comment question; use **Добавить комментарий** in the confirmation if a note is needed. The persistent keyboard also offers **Версия**, **Отменить текущую запись**, and **Последние 10 операций**.
+1. Choose **Добавить транзакцию (сегодня)** or **Добавить транзакцию (вчера)** to use that date directly, or choose **Добавить транзакцию** (or `/add`) to enter another date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted). Today/yesterday flows skip the comment question; use **Добавить комментарий** in the confirmation if a note is needed. The persistent keyboard also offers **Аналитика**, **Аналитика по категориям**, **Версия**, **Отменить текущую запись**, and **Последние 10 операций**.
 2. Choose expense or income.
 3. For an expense, choose its category and subcategory. For income, choose its source; the saved category is always `Доход`.
 4. Enter a positive integer RUB amount.
@@ -13,11 +13,14 @@ A private Telegram bot for guided income/expense entry. It writes confirmed tran
 
 The menu buttons have slash-command equivalents: `/cancel` cancels an in-progress entry, `/help` shows the menu, and `/version` reports the deployed release tag and short source commit. The bot is allowlisted to one numeric Telegram user ID. Failed/uncertain Sheets writes are not automatically retried, to avoid duplicate transactions; inspect `Траты` before attempting again.
 
+**Аналитика** reads the calculated monthly income, expenses, current balance, and category totals from the existing `Аналитика` sheet and sends a donut chart. **Аналитика по категориям** offers Еда офис, Кафе/Рестораны, Транспорт, and Продукты, then reports that category's total and subcategory totals with a chart. The bot only reads this sheet; formulas and source values are maintained in Google Sheets. Set `GOOGLE_ANALYTICS_SHEET` if the tab has a different name.
+
 ## One-time setup
 
 ### 1. Prepare Google Sheets
 
 - Keep the existing spreadsheet formulas and analysis as they are.
+- Keep the monthly summary labels (`Расходы за месяц`, `Доход за месяц`, `Остаток на текущий момент`), the `Траты по категориям (за месяц)` table, and `Подкатегории: <категория>` blocks in the `Аналитика` tab. These labels are how the bot locates the calculated results; it does not write to this tab.
 - Add a tab named `Категории` (or set `GOOGLE_CATEGORIES_SHEET` to another name). Copy the contents of [`data/categories-template.csv`](data/categories-template.csv) into it, including the header row. The template is based on the exported transaction history and analysis; edit choices in the live tab to match your canonical categories.
 - The header row must contain `Тип`, `Категория`, and `Подкатегория`. Each option is one row. Supported types are `Расход` and `Доход`. For income, use `Доход` in both type and category columns; subcategory is the income source.
 - The service account needs **Editor** access to the spreadsheet. The bot reads `Категории` and appends rows to `Траты`; it does not create or modify tabs.

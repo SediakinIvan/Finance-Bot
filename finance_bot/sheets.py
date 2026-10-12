@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from finance_bot.analytics import (
+    AnalyticsError,
+    CategoryAnalytics,
+    MonthlyAnalytics,
+    parse_category_analytics,
+    parse_monthly_analytics,
+)
+
 
 class SheetsError(RuntimeError):
     """A Google Sheets read or write operation failed."""
@@ -89,11 +97,13 @@ class GoogleSheetsStore:
         spreadsheet_id: str,
         transactions_sheet: str = "Траты",
         categories_sheet: str = "Категории",
+        analytics_sheet: str = "Аналитика",
     ) -> None:
         self.credentials_file = credentials_file
         self.spreadsheet_id = spreadsheet_id
         self.transactions_sheet = transactions_sheet
         self.categories_sheet = categories_sheet
+        self.analytics_sheet = analytics_sheet
         self._spreadsheet: Any | None = None
 
     def _get_spreadsheet(self) -> Any:
@@ -183,4 +193,26 @@ class GoogleSheetsStore:
         except Exception as exc:
             raise SheetsError(
                 f"Could not read recent rows from the '{self.transactions_sheet}' sheet."
+            ) from exc
+
+    def get_monthly_analytics(self) -> MonthlyAnalytics:
+        try:
+            worksheet = self._get_spreadsheet().worksheet(self.analytics_sheet)
+            return parse_monthly_analytics(worksheet.get_all_values())
+        except AnalyticsError as exc:
+            raise SheetsError(str(exc)) from exc
+        except Exception as exc:
+            raise SheetsError(
+                f"Could not read the '{self.analytics_sheet}' sheet."
+            ) from exc
+
+    def get_category_analytics(self, category: str) -> CategoryAnalytics:
+        try:
+            worksheet = self._get_spreadsheet().worksheet(self.analytics_sheet)
+            return parse_category_analytics(worksheet.get_all_values(), category)
+        except AnalyticsError as exc:
+            raise SheetsError(str(exc)) from exc
+        except Exception as exc:
+            raise SheetsError(
+                f"Could not read the '{self.analytics_sheet}' sheet."
             ) from exc
