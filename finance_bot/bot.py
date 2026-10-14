@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import IntEnum
@@ -30,7 +31,12 @@ from telegram.ext import (
 from finance_bot.analytics import CategoryAnalytics, MonthlyAnalytics
 from finance_bot.charts import render_donut_chart
 from finance_bot.config import Settings
-from finance_bot.sheets import CategoryOption, SheetsError
+from finance_bot.sheets import (
+    CategoryOption,
+    SheetsError,
+    StaleTransactionError,
+    TransactionRecord,
+)
 from finance_bot.version import version_text
 
 logger = logging.getLogger(__name__)
@@ -38,6 +44,8 @@ ADD_TRANSACTION_BUTTON = "Добавить транзакцию"
 ADD_TODAY_TRANSACTION_BUTTON = "Добавить транзакцию (сегодня)"
 ADD_YESTERDAY_TRANSACTION_BUTTON = "Добавить транзакцию (вчера)"
 RECENT_TRANSACTIONS_BUTTON = "Последние 10 операций"
+DELETE_LAST_BUTTON = "Удалить последнюю"
+DELETE_RECENT_BUTTON = "Выбрать для удаления"
 ANALYTICS_BUTTON = "Аналитика"
 CATEGORY_ANALYTICS_BUTTON = "Аналитика по категориям"
 VERSION_BUTTON = "Версия"
@@ -74,6 +82,8 @@ class State(IntEnum):
     AMOUNT = 4
     NOTE_TEXT = 5
     CONFIRM = 6
+    DELETE_SELECT = 7
+    DELETE_CONFIRM = 8
 
 
 _FLOW_KEYS = (
@@ -86,6 +96,11 @@ _FLOW_KEYS = (
     "pnl_optional_note",
     "pnl_options",
     "pnl_choices",
+    "pnl_amount_input",
+    "pnl_amount_token",
+    "delete_records",
+    "delete_pending",
+    "delete_token",
 )
 
 
@@ -103,6 +118,7 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
         [
             [ADD_TODAY_TRANSACTION_BUTTON, ADD_YESTERDAY_TRANSACTION_BUTTON],
             [ADD_TRANSACTION_BUTTON, RECENT_TRANSACTIONS_BUTTON],
+            [DELETE_LAST_BUTTON, DELETE_RECENT_BUTTON],
             [ANALYTICS_BUTTON, CATEGORY_ANALYTICS_BUTTON],
             [VERSION_BUTTON, CANCEL_TRANSACTION_BUTTON],
         ],
@@ -112,14 +128,150 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 def _choice_keyboard(
-    choices: Sequence[str], callback_prefix: str, columns: int = 2
+    choices: Sequence[str],
+    callback_prefix: str,
+    columns: int = 2,
+    emoji_context: str = "subcategory",
 ) -> InlineKeyboardMarkup:
     buttons = [
-        InlineKeyboardButton(label, callback_data=f"{callback_prefix}:{index}")
+        InlineKeyboardButton(
+            f"{_choice_emoji(label, emoji_context)} {label}",
+            callback_data=f"{callback_prefix}:{index}",
+        )
         for index, label in enumerate(choices)
     ]
     rows = [buttons[index : index + columns] for index in range(0, len(buttons), columns)]
     rows.extend(_cancel_keyboard())
+    return InlineKeyboardMarkup(rows)
+
+
+_CATEGORY_EMOJIS = {
+    "еда офис": "🍱",
+    "кафе/рестораны": "🍽️",
+    "транспорт": "🚗",
+    "продукты": "🛒",
+    "вб+озон": "📦",
+    "спорт": "🏐",
+    "подписки": "🔁",
+    "отдых/развлечения": "🎭",
+    "здоровье": "🩺",
+    "квартира": "🏠",
+    "развитие": "📚",
+    "путешествия": "✈️",
+}
+_INCOME_EMOJIS = {
+    "зарплата": "💼",
+    "стипендия": "🎓",
+    "от родителей": "👪",
+    "другое": "💰",
+}
+_SUBCATEGORY_EMOJIS = {
+    "столовая": "🍽️",
+    "самокат": "🛴",
+    "сладкое": "🍰",
+    "кафе": "☕",
+    "кофе": "☕",
+    "ресторан": "🍽️",
+    "фастфуд": "🍔",
+    "магазин": "🛍️",
+    "доставка": "🛵",
+    "перекус": "🥪",
+    "готовая еда": "🍱",
+    "штраф": "🚨",
+    "штрафы": "🚨",
+    "бенз": "⛽",
+    "общественный": "🚌",
+    "платка": "🛣️",
+    "самокаты": "🛴",
+    "карш": "🚘",
+    "такси": "🚕",
+    "whoosh": "🛴",
+    "вб+озон": "📦",
+    "волейбол": "🏐",
+    "подписки": "🔁",
+    "отдых/развлечения": "🎭",
+    "здоровье": "🩺",
+    "квартира": "🏠",
+    "развитие": "📚",
+    "путешествия": "✈️",
+}
+
+
+def _choice_emoji(label: str, context: str) -> str:
+    normalized = label.strip().casefold()
+    if context == "category":
+        return _CATEGORY_EMOJIS.get(normalized, "🏷️")
+    if context == "income":
+        return _INCOME_EMOJIS.get(normalized, "🔹")
+    return _SUBCATEGORY_EMOJIS.get(normalized, "🔹")
+
+
+def _amount_keyboard(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
+    token = context.user_data["pnl_amount_token"]
+    rows = [
+        [
+            InlineKeyboardButton(
+                str(number),
+                callback_data=f"amount:{token}:digit:{number}",
+            )
+            for number in numbers
+        ]
+        for numbers in ((1, 2, 3), (4, 5, 6), (7, 8, 9))
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton("⌫", callback_data=f"amount:{token}:backspace"),
+            InlineKeyboardButton("0", callback_data=f"amount:{token}:digit:0"),
+            InlineKeyboardButton("🧹", callback_data=f"amount:{token}:clear"),
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton("Готово", callback_data=f"amount:{token}:done")]
+    )
+    rows.extend(_cancel_keyboard())
+    return InlineKeyboardMarkup(rows)
+
+
+def _delete_confirmation_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🗑 Удалить",
+                    callback_data=f"delete:confirm:{token}",
+                ),
+                InlineKeyboardButton(
+                    "Не удалять",
+                    callback_data=f"delete:cancel:{token}",
+                ),
+            ]
+        ]
+    )
+
+
+def _delete_choice_keyboard(
+    records: Sequence[TransactionRecord], token: str
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, record in enumerate(reversed(records), start=1):
+        date_value, category, _, amount, _, _ = record.values
+        label = f"{index}. {date_value} · {category[:22]} · {amount[:12]} ₽"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"delete:select:{token}:{index - 1}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "Отмена",
+                callback_data=f"delete:cancel:{token}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -199,7 +351,9 @@ def _set_subcategory(
         if transaction_type == "Доход"
         else context.user_data["pnl_category"]
     )
-    return f"Подкатегория: {subcategory}\nВведите сумму целым числом рублей:"
+    context.user_data["pnl_amount_input"] = ""
+    context.user_data["pnl_amount_token"] = secrets.token_hex(4)
+    return _amount_prompt(context)
 
 
 def _render_preview(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -250,6 +404,7 @@ async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Кнопка «{ADD_YESTERDAY_TRANSACTION_BUTTON}» — добавить операцию за вчера\n"
         f"Кнопка «{ADD_TRANSACTION_BUTTON}» или /add — указать произвольную дату\n"
         f"Кнопка «{RECENT_TRANSACTIONS_BUTTON}» — показать последние 10 операций\n"
+        f"Кнопки «{DELETE_LAST_BUTTON}» и «{DELETE_RECENT_BUTTON}» — удалить операцию\n"
         f"Кнопка «{ANALYTICS_BUTTON}» — сводка за месяц и траты по категориям\n"
         f"Кнопка «{CATEGORY_ANALYTICS_BUTTON}» — аналитика выбранной категории\n"
         f"Кнопка «{VERSION_BUTTON}» или /version — показать версию бота\n"
@@ -265,12 +420,13 @@ async def show_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(version_text())
 
 
-def _recent_transaction_messages(rows: Sequence[Sequence[str]]) -> list[str]:
-    if not rows:
+def _recent_transaction_messages(records: Sequence[TransactionRecord]) -> list[str]:
+    if not records:
         return ["В таблице пока нет операций."]
 
     blocks = ["Последние операции (от более старых к новым):"]
-    for number, row in enumerate(rows, start=1):
+    for number, record in enumerate(records, start=1):
+        row = record.values
         date_value, category, subcategory, amount, transaction_type, note = row
         blocks.append(
             f"{number}. Дата: {date_value}\n"
@@ -310,6 +466,164 @@ async def show_recent_transactions(
 
     for message in _recent_transaction_messages(rows):
         await update.effective_message.reply_text(message)
+
+
+def _transaction_details(record: TransactionRecord) -> str:
+    date_value, category, subcategory, amount, transaction_type, note = record.values
+    return (
+        f"Дата: {date_value}\n"
+        f"Тип: {transaction_type}\n"
+        f"Категория: {category}\n"
+        f"Подкатегория: {subcategory}\n"
+        f"Сумма: {amount} ₽\n"
+        f"Примечание: {note or '—'}"
+    )
+
+
+async def _start_deletion(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, last_only: bool
+) -> int:
+    _forget_flow(context)
+    token = secrets.token_hex(4)
+    context.user_data["delete_token"] = token
+    try:
+        records = await asyncio.to_thread(
+            _store(context, update).get_recent_transactions, 1 if last_only else 10
+        )
+    except SheetsError as exc:
+        logger.warning("Could not load transactions for deletion: %s", exc)
+        await update.effective_message.reply_text(
+            "Не удалось прочитать операции из листа «Траты». Попробуйте ещё раз."
+        )
+        _forget_deletion(context)
+        return ConversationHandler.END
+
+    if not records:
+        await update.effective_message.reply_text("В таблице пока нет операций для удаления.")
+        _forget_deletion(context)
+        return ConversationHandler.END
+
+    if last_only:
+        record = records[-1]
+        context.user_data["delete_pending"] = record
+        await update.effective_message.reply_text(
+            "Удалить последнюю операцию?\n\n" + _transaction_details(record),
+            reply_markup=_delete_confirmation_keyboard(token),
+        )
+        return State.DELETE_CONFIRM
+
+    context.user_data["delete_records"] = records
+    await update.effective_message.reply_text(
+        "Выберите операцию для удаления (сначала самые новые):",
+        reply_markup=_delete_choice_keyboard(records, token),
+    )
+    return State.DELETE_SELECT
+
+
+async def start_delete_last(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    return await _start_deletion(update, context, last_only=True)
+
+
+async def start_delete_recent(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    return await _start_deletion(update, context, last_only=False)
+
+
+async def select_transaction_for_deletion(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    try:
+        _, _, token, index_text = query.data.split(":")
+        if token != context.user_data.get("delete_token"):
+            await query.answer(
+                "Этот список устарел. Используйте актуальные кнопки удаления.",
+                show_alert=True,
+            )
+            return State.DELETE_SELECT
+        index = int(index_text)
+        records = context.user_data["delete_records"]
+        record = list(reversed(records))[index]
+    except (IndexError, KeyError, ValueError):
+        await query.answer()
+        await query.edit_message_text(
+            "Список устарел. Откройте «Выбрать для удаления» ещё раз."
+        )
+        return ConversationHandler.END
+
+    await query.answer()
+    context.user_data["delete_pending"] = record
+    await query.edit_message_text(
+        "Подтвердите удаление этой операции:\n\n" + _transaction_details(record),
+        reply_markup=_delete_confirmation_keyboard(token),
+    )
+    return State.DELETE_CONFIRM
+
+
+def _forget_deletion(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("delete_records", None)
+    context.user_data.pop("delete_pending", None)
+    context.user_data.pop("delete_token", None)
+
+
+async def confirm_transaction_deletion(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    action, token = query.data.rsplit(":", maxsplit=1)
+    if token != context.user_data.get("delete_token"):
+        await query.answer(
+            "Эта кнопка устарела. Текущая операция не изменена.",
+            show_alert=True,
+        )
+        return (
+            State.DELETE_CONFIRM
+            if context.user_data.get("delete_pending") is not None
+            else State.DELETE_SELECT
+        )
+    await query.answer()
+    if action == "delete:cancel":
+        await query.edit_message_text("Удаление отменено; таблица не изменена.")
+        _forget_deletion(context)
+        return ConversationHandler.END
+
+    record = context.user_data.get("delete_pending")
+    if not isinstance(record, TransactionRecord):
+        await query.edit_message_text(
+            "Выбор устарел. Откройте удаление операции ещё раз."
+        )
+        _forget_deletion(context)
+        return ConversationHandler.END
+
+    try:
+        await asyncio.to_thread(_store(context, update).delete_transaction, record)
+    except StaleTransactionError:
+        logger.info("Deletion rejected because the selected transaction row changed.")
+        await query.edit_message_text(
+            "Операция изменилась после выбора; ничего не удалено. "
+            "Откройте список операций ещё раз."
+        )
+        _forget_deletion(context)
+        return ConversationHandler.END
+    except SheetsError as exc:
+        logger.warning("Could not delete transaction: %s", exc)
+        await query.edit_message_text(
+            "Не удалось удалить операцию из листа «Траты». "
+            "Проверьте таблицу и попробуйте снова."
+        )
+        _forget_deletion(context)
+        return ConversationHandler.END
+
+    await query.edit_message_text("✅ Операция удалена из листа «Траты».")
+    _forget_deletion(context)
+    return ConversationHandler.END
 
 
 def _format_rubles(amount: Decimal) -> str:
@@ -368,7 +682,10 @@ async def show_category_analytics_choices(
     update: Update, _context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     buttons = [
-        InlineKeyboardButton(category, callback_data=f"analytics:category:{index}")
+        InlineKeyboardButton(
+            f"{_choice_emoji(category, 'category')} {category}",
+            callback_data=f"analytics:category:{index}",
+        )
         for index, category in enumerate(_ANALYTICS_CATEGORIES)
     ]
     keyboard = InlineKeyboardMarkup(
@@ -512,12 +829,15 @@ async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             )
             return ConversationHandler.END
         if len(choices) == 1:
-            await query.edit_message_text(_set_subcategory(context, choices[0]))
+            await query.edit_message_text(
+                _set_subcategory(context, choices[0]),
+                reply_markup=_amount_keyboard(context),
+            )
             return State.AMOUNT
         context.user_data["pnl_choices"] = choices
         await query.edit_message_text(
             "Выберите источник дохода:",
-            reply_markup=_choice_keyboard(choices, "sub"),
+            reply_markup=_choice_keyboard(choices, "sub", emoji_context="income"),
         )
         return State.SUBCATEGORY
 
@@ -531,7 +851,7 @@ async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["pnl_choices"] = choices
     await query.edit_message_text(
         "Выберите категорию расхода:",
-        reply_markup=_choice_keyboard(choices, "cat"),
+        reply_markup=_choice_keyboard(choices, "cat", emoji_context="category"),
     )
     return State.CATEGORY
 
@@ -564,7 +884,10 @@ async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return ConversationHandler.END
     if len(choices) == 1:
-        await query.edit_message_text(_set_subcategory(context, choices[0]))
+        await query.edit_message_text(
+            _set_subcategory(context, choices[0]),
+            reply_markup=_amount_keyboard(context),
+        )
         return State.AMOUNT
     context.user_data["pnl_choices"] = choices
     await query.edit_message_text(
@@ -588,8 +911,38 @@ async def choose_subcategory(
         await query.edit_message_text("Кнопка устарела. Начните заново командой /add.")
         return ConversationHandler.END
 
-    await query.edit_message_text(_set_subcategory(context, subcategory))
+    await query.edit_message_text(
+        _set_subcategory(context, subcategory),
+        reply_markup=_amount_keyboard(context),
+    )
     return State.AMOUNT
+
+
+def _amount_prompt(context: ContextTypes.DEFAULT_TYPE) -> str:
+    amount = context.user_data.get("pnl_amount_input", "")
+    return (
+        f"Категория: {context.user_data['pnl_category']}\n"
+        f"Подкатегория: {context.user_data['pnl_subcategory']}\n"
+        "Введите сумму целым числом рублей:\n\n"
+        f"Сумма: {amount or '—'} ₽"
+    )
+
+
+async def _complete_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int
+) -> None:
+    context.user_data["pnl_amount"] = amount
+    context.user_data["pnl_note"] = ""
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            _render_preview(context),
+            reply_markup=_confirmation_keyboard(include_add_note=True),
+        )
+    else:
+        await update.effective_message.reply_text(
+            _render_preview(context),
+            reply_markup=_confirmation_keyboard(include_add_note=True),
+        )
 
 
 async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -599,13 +952,56 @@ async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(str(exc))
         return State.AMOUNT
 
-    context.user_data["pnl_amount"] = amount
-    context.user_data["pnl_note"] = ""
-    await update.effective_message.reply_text(
-        _render_preview(context),
-        reply_markup=_confirmation_keyboard(include_add_note=True),
-    )
+    await _complete_amount(update, context, amount)
     return State.CONFIRM
+
+
+async def update_amount_from_keypad(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if await _reject_unauthorized_callback(update, context):
+        return ConversationHandler.END
+    query = update.callback_query
+    _, token, action, *digit = query.data.split(":")
+    if token != context.user_data.get("pnl_amount_token"):
+        await query.answer(
+            "Эта клавиатура устарела. Используйте текущий ввод суммы.",
+            show_alert=True,
+        )
+        return State.AMOUNT
+    value = context.user_data.get("pnl_amount_input", "")
+
+    if action == "done":
+        try:
+            amount = _parse_amount(value)
+        except ValueError as exc:
+            await query.answer(str(exc), show_alert=True)
+            return State.AMOUNT
+        await query.answer()
+        await _complete_amount(update, context, amount)
+        return State.CONFIRM
+
+    if action == "backspace":
+        value = value[:-1]
+    elif action == "clear":
+        value = ""
+    elif action == "digit":
+        value += digit[0]
+    else:
+        await query.answer("Эта кнопка больше не активна.", show_alert=True)
+        return State.AMOUNT
+
+    if value == context.user_data.get("pnl_amount_input", ""):
+        await query.answer()
+        return State.AMOUNT
+
+    context.user_data["pnl_amount_input"] = value
+    await query.answer()
+    await query.edit_message_text(
+        _amount_prompt(context),
+        reply_markup=_amount_keyboard(context),
+    )
+    return State.AMOUNT
 
 
 async def receive_note(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -721,6 +1117,8 @@ def build_conversation(settings: Settings) -> ConversationHandler:
         rf"{re.escape(ADD_TODAY_TRANSACTION_BUTTON)}|"
         rf"{re.escape(ADD_YESTERDAY_TRANSACTION_BUTTON)}|"
         rf"{re.escape(RECENT_TRANSACTIONS_BUTTON)}|"
+        rf"{re.escape(DELETE_LAST_BUTTON)}|"
+        rf"{re.escape(DELETE_RECENT_BUTTON)}|"
         rf"{re.escape(ANALYTICS_BUTTON)}|"
         rf"{re.escape(CATEGORY_ANALYTICS_BUTTON)}|"
         rf"{re.escape(VERSION_BUTTON)}|"
@@ -746,6 +1144,14 @@ def build_conversation(settings: Settings) -> ConversationHandler:
                 filters.Regex(rf"^{re.escape(CANCEL_TRANSACTION_BUTTON)}$") & authorized,
                 cancel_current_entry,
             ),
+            MessageHandler(
+                filters.Regex(rf"^{re.escape(DELETE_LAST_BUTTON)}$") & authorized,
+                start_delete_last,
+            ),
+            MessageHandler(
+                filters.Regex(rf"^{re.escape(DELETE_RECENT_BUTTON)}$") & authorized,
+                start_delete_recent,
+            ),
         ],
         states={
             State.CUSTOM_DATE: [MessageHandler(text_input, receive_custom_date)],
@@ -758,11 +1164,33 @@ def build_conversation(settings: Settings) -> ConversationHandler:
             State.SUBCATEGORY: [
                 CallbackQueryHandler(choose_subcategory, pattern=r"^sub:[0-9]+$")
             ],
-            State.AMOUNT: [MessageHandler(text_input, receive_amount)],
+            State.AMOUNT: [
+                MessageHandler(text_input, receive_amount),
+                CallbackQueryHandler(
+                    update_amount_from_keypad,
+                    pattern=r"^amount:[0-9a-f]{8}:(?:digit:[0-9]|backspace|clear|done)$",
+                ),
+            ],
             State.NOTE_TEXT: [MessageHandler(text_input, receive_note)],
             State.CONFIRM: [
                 CallbackQueryHandler(confirm_save, pattern=r"^save:(yes|no)$"),
                 CallbackQueryHandler(request_optional_note, pattern=r"^note:add$"),
+            ],
+            State.DELETE_SELECT: [
+                CallbackQueryHandler(
+                    select_transaction_for_deletion,
+                    pattern=r"^delete:select:[0-9a-f]{8}:[0-9]+$",
+                ),
+                CallbackQueryHandler(
+                    confirm_transaction_deletion,
+                    pattern=r"^delete:cancel:[0-9a-f]{8}$",
+                ),
+            ],
+            State.DELETE_CONFIRM: [
+                CallbackQueryHandler(
+                    confirm_transaction_deletion,
+                    pattern=r"^delete:(?:confirm|cancel):[0-9a-f]{8}$",
+                )
             ],
         },
         fallbacks=[

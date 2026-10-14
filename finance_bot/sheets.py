@@ -25,6 +25,16 @@ class CategoryOption:
     subcategory: str
 
 
+@dataclass(frozen=True)
+class TransactionRecord:
+    row_number: int
+    values: tuple[str, str, str, str, str, str]
+
+
+class StaleTransactionError(SheetsError):
+    """Raised when a transaction row changes after it was presented for deletion."""
+
+
 _HEADER_ALIASES = {
     "type": {"тип", "доход/расход", "тип операции", "transaction type", "type"},
     "category": {"категория", "category"},
@@ -174,7 +184,7 @@ class GoogleSheetsStore:
                 "Check the row in Google Sheets before trying again."
             ) from exc
 
-    def get_recent_transactions(self, limit: int = 10) -> list[list[str]]:
+    def get_recent_transactions(self, limit: int = 10) -> list[TransactionRecord]:
         if limit <= 0:
             raise ValueError("The transaction limit must be positive.")
         try:
@@ -182,17 +192,47 @@ class GoogleSheetsStore:
             if worksheet.row_count < 2:
                 return []
             rows = worksheet.get(f"A2:F{worksheet.row_count}")
-            transactions: list[list[str]] = []
-            for values in rows:
+            transactions: list[TransactionRecord] = []
+            for row_number, values in enumerate(rows, start=2):
                 if not values or not str(values[0]).strip():
                     continue
                 transaction = [str(value) for value in values[:6]]
                 transaction.extend([""] * (6 - len(transaction)))
-                transactions.append(transaction)
+                transaction_values = (
+                    transaction[0],
+                    transaction[1],
+                    transaction[2],
+                    transaction[3],
+                    transaction[4],
+                    transaction[5],
+                )
+                transactions.append(
+                    TransactionRecord(row_number, transaction_values)
+                )
             return transactions[-limit:]
         except Exception as exc:
             raise SheetsError(
                 f"Could not read recent rows from the '{self.transactions_sheet}' sheet."
+            ) from exc
+
+    def delete_transaction(self, record: TransactionRecord) -> None:
+        if record.row_number < 2:
+            raise ValueError("A transaction can only be deleted from a data row.")
+        try:
+            worksheet = self._get_spreadsheet().worksheet(self.transactions_sheet)
+            rows = worksheet.get(f"A{record.row_number}:F{record.row_number}")
+            current_values = list(rows[0])[:6] if rows else []
+            current_values.extend([""] * (6 - len(current_values)))
+            if tuple(str(value) for value in current_values) != record.values:
+                raise StaleTransactionError(
+                    "The transaction row changed after it was selected for deletion."
+                )
+            worksheet.delete_rows(record.row_number)
+        except StaleTransactionError:
+            raise
+        except Exception as exc:
+            raise SheetsError(
+                f"Could not delete the selected row from the '{self.transactions_sheet}' sheet."
             ) from exc
 
     def get_monthly_analytics(self) -> MonthlyAnalytics:

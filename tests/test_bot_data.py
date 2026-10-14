@@ -14,8 +14,10 @@ from telegram.ext import ConversationHandler
 from finance_bot.bot import (
     _parse_amount,
     _parse_date,
+    _choice_emoji,
     _reject_unauthorized_callback,
     _store,
+    confirm_transaction_deletion,
     show_analytics,
     show_category_analytics,
     show_category_analytics_choices,
@@ -25,6 +27,7 @@ from finance_bot.bot import (
     choose_subcategory,
     choose_type,
     receive_amount,
+    update_amount_from_keypad,
     cancel_current_entry,
     request_optional_note,
     show_recent_transactions,
@@ -33,6 +36,9 @@ from finance_bot.bot import (
     start_add_yesterday,
     start_help,
     show_version,
+    start_delete_last,
+    start_delete_recent,
+    select_transaction_for_deletion,
 )
 from finance_bot.config import ConfigurationError, Settings
 from finance_bot.charts import render_donut_chart
@@ -44,7 +50,14 @@ from finance_bot.analytics import (
     parse_category_analytics,
     parse_monthly_analytics,
 )
-from finance_bot.sheets import CategoryOption, GoogleSheetsStore, SheetsError, parse_taxonomy_rows
+from finance_bot.sheets import (
+    CategoryOption,
+    GoogleSheetsStore,
+    SheetsError,
+    StaleTransactionError,
+    TransactionRecord,
+    parse_taxonomy_rows,
+)
 
 
 ANALYTICS_ROWS = [
@@ -278,9 +291,66 @@ class TransactionsStoreTests(unittest.TestCase):
 
         self.assertEqual(
             store.get_recent_transactions(),
-            dated_rows[-10:],
+            [
+                TransactionRecord(day + 2, tuple(row))
+                for day, row in zip(range(3, 13), dated_rows[-10:])
+            ],
         )
         self.assertEqual(worksheet.range_name, "A2:F20")
+
+    def test_deletes_selected_physical_row_only_when_snapshot_matches(self) -> None:
+        transaction = ["10.10.2026", "Кафе", "Кофе", "250", "Расход", ""]
+
+        class FakeWorksheet:
+            row_count = 5
+            deleted_rows: list[int] = []
+
+            def get(self, range_name: str) -> list[list[str]]:
+                self.range_name = range_name
+                return [transaction]
+
+            def delete_rows(self, row_number: int) -> None:
+                self.deleted_rows.append(row_number)
+
+        worksheet = FakeWorksheet()
+
+        class FakeSpreadsheetWithRows:
+            def worksheet(self, name: str) -> FakeWorksheet:
+                return worksheet
+
+        store = GoogleSheetsStore("unused.json", "unused-id")
+        store._spreadsheet = FakeSpreadsheetWithRows()
+        record = TransactionRecord(4, tuple(transaction))
+
+        store.delete_transaction(record)
+
+        self.assertEqual(worksheet.range_name, "A4:F4")
+        self.assertEqual(worksheet.deleted_rows, [4])
+
+    def test_rejects_deletion_if_selected_row_has_changed(self) -> None:
+        class FakeWorksheet:
+            row_count = 5
+
+            def get(self, range_name: str) -> list[list[str]]:
+                return [["11.10.2026", "Кафе", "Кофе", "250", "Расход", ""]]
+
+            def delete_rows(self, row_number: int) -> None:
+                self.fail("A changed transaction must not be deleted.")
+
+        class FakeSpreadsheetWithRows:
+            def worksheet(self, name: str) -> FakeWorksheet:
+                return FakeWorksheet()
+
+        store = GoogleSheetsStore("unused.json", "unused-id")
+        store._spreadsheet = FakeSpreadsheetWithRows()
+
+        with self.assertRaises(StaleTransactionError):
+            store.delete_transaction(
+                TransactionRecord(
+                    4,
+                    ("10.10.2026", "Кафе", "Кофе", "250", "Расход", ""),
+                )
+            )
 
 
 class AnalyticsTests(unittest.TestCase):
@@ -406,6 +476,13 @@ class AnalyticsTests(unittest.TestCase):
 
 
 class TelegramHandlerTests(unittest.TestCase):
+    def test_choice_buttons_get_contextual_emojis_with_neutral_fallback(self) -> None:
+        self.assertEqual(_choice_emoji("Еда офис", "category"), "🍱")
+        self.assertEqual(_choice_emoji("Зарплата", "income"), "💼")
+        self.assertEqual(_choice_emoji("Кофе", "subcategory"), "☕")
+        self.assertEqual(_choice_emoji("Новая категория", "category"), "🏷️")
+        self.assertEqual(_choice_emoji("Новая подкатегория", "subcategory"), "🔹")
+
     def test_help_shows_requested_persistent_menu_buttons(self) -> None:
         reply_text = AsyncMock()
         update = SimpleNamespace(
@@ -422,6 +499,7 @@ class TelegramHandlerTests(unittest.TestCase):
             [
                 ["Добавить транзакцию (сегодня)", "Добавить транзакцию (вчера)"],
                 ["Добавить транзакцию", "Последние 10 операций"],
+                ["Удалить последнюю", "Выбрать для удаления"],
                 ["Аналитика", "Аналитика по категориям"],
                 ["Версия", "Отменить текущую запись"],
             ],
@@ -489,10 +567,10 @@ class TelegramHandlerTests(unittest.TestCase):
                 for button in row
             ],
             [
-                ("Еда офис", "analytics:category:0"),
-                ("Кафе/Рестораны", "analytics:category:1"),
-                ("Транспорт", "analytics:category:2"),
-                ("Продукты", "analytics:category:3"),
+                ("🍱 Еда офис", "analytics:category:0"),
+                ("🍽️ Кафе/Рестораны", "analytics:category:1"),
+                ("🚗 Транспорт", "analytics:category:2"),
+                ("🛒 Продукты", "analytics:category:3"),
             ],
         )
 
@@ -668,7 +746,7 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(context.user_data["pnl_category"], "REST")
         self.assertEqual(context.user_data["pnl_subcategory"], "REST")
         self.assertIn("Введите сумму", edit_message_text.await_args.args[0])
-        self.assertIsNone(edit_message_text.await_args.kwargs.get("reply_markup"))
+        self.assertIsNotNone(edit_message_text.await_args.kwargs.get("reply_markup"))
 
     def test_multiple_expense_subcategories_still_require_selection(self) -> None:
         answer = AsyncMock()
@@ -706,6 +784,15 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(context.user_data["pnl_choices"], ["Кофе", "Обед"])
         self.assertIn("Выберите подкатегорию", edit_message_text.await_args.args[0])
         self.assertIsNotNone(edit_message_text.await_args.kwargs["reply_markup"])
+        buttons = [
+            button
+            for row in edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(
+            [(button.text, button.callback_data) for button in buttons[:2]],
+            [("☕ Кофе", "sub:0"), ("🔹 Обед", "sub:1")],
+        )
 
     def test_single_income_subcategory_is_selected_automatically(self) -> None:
         answer = AsyncMock()
@@ -740,11 +827,12 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(context.user_data["pnl_category"], "Доход")
         self.assertEqual(context.user_data["pnl_subcategory"], "Зарплата")
         self.assertIn("Введите сумму", edit_message_text.await_args.args[0])
-        self.assertIsNone(edit_message_text.await_args.kwargs.get("reply_markup"))
+        self.assertIsNotNone(edit_message_text.await_args.kwargs.get("reply_markup"))
 
     def test_amount_proceeds_directly_to_confirmation_with_optional_comment(self) -> None:
         reply_text = AsyncMock()
         update = SimpleNamespace(
+            callback_query=None,
             effective_message=SimpleNamespace(text="250", reply_text=reply_text)
         )
         context = SimpleNamespace(
@@ -779,6 +867,144 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(
             confirmation_labels,
             ["✅ Подтвердить", "❌ Отменить"],
+        )
+
+    def test_amount_keypad_appends_digits_and_shows_controls(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="amount:abcdef01:digit:0",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            ),
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_amount_input": "25",
+                "pnl_amount_token": "abcdef01",
+                "pnl_category": "Кафе",
+                "pnl_subcategory": "Кофе",
+            },
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(update_amount_from_keypad(update, context))
+
+        self.assertEqual(result, State.AMOUNT)
+        self.assertEqual(context.user_data["pnl_amount_input"], "250")
+        self.assertIn("Сумма: 250 ₽", edit_message_text.await_args.args[0])
+        callback_data = [
+            button.callback_data
+            for row in edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("amount:abcdef01:backspace", callback_data)
+        self.assertIn("amount:abcdef01:clear", callback_data)
+        self.assertIn("amount:abcdef01:done", callback_data)
+        self.assertIn("flow:cancel", callback_data)
+
+    def test_amount_keypad_done_uses_existing_amount_validation_and_preview(self) -> None:
+        answer = AsyncMock()
+        edit_message_text = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="amount:abcdef01:done",
+                answer=answer,
+                edit_message_text=edit_message_text,
+            ),
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_amount_input": "250",
+                "pnl_amount_token": "abcdef01",
+                "pnl_date": "11.10.2026",
+                "pnl_type": "Расход",
+                "pnl_category": "Кафе",
+                "pnl_subcategory": "Кофе",
+            },
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(update_amount_from_keypad(update, context))
+
+        self.assertEqual(result, State.CONFIRM)
+        self.assertEqual(context.user_data["pnl_amount"], 250)
+        self.assertIn("Сумма: 250 ₽", edit_message_text.await_args.args[0])
+
+    def test_amount_keypad_rejects_zero_without_leaving_amount_state(self) -> None:
+        answer = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="amount:abcdef01:done",
+                answer=answer,
+            ),
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={"pnl_amount_input": "0", "pnl_amount_token": "abcdef01"},
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(update_amount_from_keypad(update, context))
+
+        self.assertEqual(result, State.AMOUNT)
+        answer.assert_awaited_once_with("Сумма должна быть больше нуля.", show_alert=True)
+
+    def test_old_amount_keypad_cannot_change_current_amount(self) -> None:
+        answer = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                from_user=SimpleNamespace(id=123456),
+                data="amount:deadbeef:digit:9",
+                answer=answer,
+            ),
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={
+                "pnl_amount_input": "250",
+                "pnl_amount_token": "abcdef01",
+            },
+            application=SimpleNamespace(bot_data={"settings": settings}),
+        )
+
+        result = asyncio.run(update_amount_from_keypad(update, context))
+
+        self.assertEqual(result, State.AMOUNT)
+        self.assertEqual(context.user_data["pnl_amount_input"], "250")
+        answer.assert_awaited_once_with(
+            "Эта клавиатура устарела. Используйте текущий ввод суммы.",
+            show_alert=True,
         )
 
     def test_optional_comment_button_prompts_for_comment(self) -> None:
@@ -858,7 +1084,9 @@ class TelegramHandlerTests(unittest.TestCase):
     def test_recent_button_returns_numbered_rows(self) -> None:
         reply_text = AsyncMock()
         row = ["10.10.2026", "Кафе", "Кофе", "250", "Расход", "с коллегой"]
-        store = SimpleNamespace(get_recent_transactions=lambda: [row])
+        store = SimpleNamespace(
+            get_recent_transactions=lambda limit=10: [TransactionRecord(2, tuple(row))]
+        )
         update = SimpleNamespace(
             effective_user=SimpleNamespace(id=123456),
             effective_message=SimpleNamespace(reply_text=reply_text)
@@ -879,6 +1107,201 @@ class TelegramHandlerTests(unittest.TestCase):
             "   Подкатегория: Кофе\n"
             "   Сумма: 250 ₽\n"
             "   Примечание: с коллегой"
+        )
+
+    def test_delete_recent_shows_newest_first_and_deletes_selected_physical_row(self) -> None:
+        older = TransactionRecord(
+            2, ("09.10.2026", "Продукты", "Магазин", "500", "Расход", "")
+        )
+        newest = TransactionRecord(
+            5, ("11.10.2026", "Кафе", "Кофе", "250", "Расход", "")
+        )
+        deleted: list[TransactionRecord] = []
+        store = SimpleNamespace(
+            get_recent_transactions=lambda limit=10: [older, newest][-limit:],
+            delete_transaction=deleted.append,
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={},
+            application=SimpleNamespace(
+                bot_data={
+                    "settings": settings,
+                    "sheets_stores": {123456: store},
+                }
+            ),
+        )
+        start_reply = AsyncMock()
+        start_update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=123456),
+            effective_message=SimpleNamespace(reply_text=start_reply),
+        )
+
+        result = asyncio.run(start_delete_recent(start_update, context))
+
+        self.assertEqual(result, State.DELETE_SELECT)
+        buttons = [
+            button
+            for row in start_reply.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(
+            [button.text for button in buttons[:2]],
+            [
+                "1. 11.10.2026 · Кафе · 250 ₽",
+                "2. 09.10.2026 · Продукты · 500 ₽",
+            ],
+        )
+        self.assertRegex(buttons[0].callback_data, r"^delete:select:[0-9a-f]{8}:0$")
+        self.assertRegex(buttons[1].callback_data, r"^delete:select:[0-9a-f]{8}:1$")
+
+        select_query = SimpleNamespace(
+            from_user=SimpleNamespace(id=123456),
+            data=buttons[0].callback_data,
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        select_update = SimpleNamespace(
+            callback_query=select_query,
+            effective_chat=SimpleNamespace(type="private"),
+            effective_user=SimpleNamespace(id=123456),
+        )
+        result = asyncio.run(select_transaction_for_deletion(select_update, context))
+
+        self.assertEqual(result, State.DELETE_CONFIRM)
+        self.assertIs(context.user_data["delete_pending"], newest)
+        self.assertIn("11.10.2026", select_query.edit_message_text.await_args.args[0])
+
+        confirm_keyboard = select_query.edit_message_text.await_args.kwargs["reply_markup"]
+        confirm_query = SimpleNamespace(
+            from_user=SimpleNamespace(id=123456),
+            data=confirm_keyboard.inline_keyboard[0][0].callback_data,
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        confirm_update = SimpleNamespace(
+            callback_query=confirm_query,
+            effective_chat=SimpleNamespace(type="private"),
+            effective_user=SimpleNamespace(id=123456),
+        )
+        result = asyncio.run(confirm_transaction_deletion(confirm_update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(deleted, [newest])
+        self.assertIn("удалена", confirm_query.edit_message_text.await_args.args[0])
+        self.assertNotIn("delete_pending", context.user_data)
+
+    def test_delete_last_requires_confirmation_and_can_be_cancelled(self) -> None:
+        last = TransactionRecord(
+            7, ("11.10.2026", "Кафе", "Кофе", "250", "Расход", "")
+        )
+        deleted: list[TransactionRecord] = []
+        store = SimpleNamespace(
+            get_recent_transactions=lambda limit=10: [last][-limit:],
+            delete_transaction=deleted.append,
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={},
+            application=SimpleNamespace(
+                bot_data={
+                    "settings": settings,
+                    "sheets_stores": {123456: store},
+                }
+            ),
+        )
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=123456),
+            effective_message=SimpleNamespace(reply_text=reply_text),
+        )
+
+        result = asyncio.run(start_delete_last(update, context))
+
+        self.assertEqual(result, State.DELETE_CONFIRM)
+        self.assertIs(context.user_data["delete_pending"], last)
+        self.assertIn("Удалить последнюю операцию?", reply_text.await_args.args[0])
+
+        cancel_keyboard = reply_text.await_args.kwargs["reply_markup"]
+        cancel_query = SimpleNamespace(
+            from_user=SimpleNamespace(id=123456),
+            data=cancel_keyboard.inline_keyboard[0][1].callback_data,
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        cancel_update = SimpleNamespace(
+            callback_query=cancel_query,
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        result = asyncio.run(confirm_transaction_deletion(cancel_update, context))
+
+        self.assertEqual(result, ConversationHandler.END)
+        self.assertEqual(deleted, [])
+        self.assertNotIn("delete_pending", context.user_data)
+
+    def test_old_delete_confirmation_cannot_delete_current_selection(self) -> None:
+        record = TransactionRecord(
+            7, ("11.10.2026", "Кафе", "Кофе", "250", "Расход", "")
+        )
+        deleted: list[TransactionRecord] = []
+        store = SimpleNamespace(
+            get_recent_transactions=lambda limit=10: [record][-limit:],
+            delete_transaction=deleted.append,
+        )
+        settings = Settings(
+            telegram_token="123456:unit-test-token",
+            allowed_telegram_user_id=123456,
+            google_credentials_file=Path("service-account.json"),
+            spreadsheet_id="test-sheet-id",
+        )
+        context = SimpleNamespace(
+            user_data={},
+            application=SimpleNamespace(
+                bot_data={
+                    "settings": settings,
+                    "sheets_stores": {123456: store},
+                }
+            ),
+        )
+        old_reply = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=123456),
+            effective_message=SimpleNamespace(reply_text=old_reply),
+        )
+
+        asyncio.run(start_delete_last(update, context))
+        old_keyboard = old_reply.await_args.kwargs["reply_markup"]
+        old_confirm_data = old_keyboard.inline_keyboard[0][0].callback_data
+        asyncio.run(start_delete_last(update, context))
+
+        query = SimpleNamespace(
+            from_user=SimpleNamespace(id=123456),
+            data=old_confirm_data,
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        callback_update = SimpleNamespace(
+            callback_query=query,
+            effective_chat=SimpleNamespace(type="private"),
+            effective_user=SimpleNamespace(id=123456),
+        )
+        result = asyncio.run(confirm_transaction_deletion(callback_update, context))
+
+        self.assertEqual(result, State.DELETE_CONFIRM)
+        self.assertEqual(deleted, [])
+        query.answer.assert_awaited_once_with(
+            "Эта кнопка устарела. Текущая операция не изменена.",
+            show_alert=True,
         )
 
     def test_conversation_registers_with_configured_user_allowlist(self) -> None:

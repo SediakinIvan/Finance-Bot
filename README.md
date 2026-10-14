@@ -4,14 +4,14 @@ A private Telegram bot for guided income/expense entry. It writes confirmed tran
 
 ## Current transaction flow
 
-1. Choose **Добавить транзакцию (сегодня)** or **Добавить транзакцию (вчера)** to use that date directly, or choose **Добавить транзакцию** (or `/add`) to enter another date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted). Today/yesterday flows skip the comment question; use **Добавить комментарий** in the confirmation if a note is needed. The persistent keyboard also offers **Аналитика**, **Аналитика по категориям**, **Версия**, **Отменить текущую запись**, and **Последние 10 операций**.
+1. Choose **Добавить транзакцию (сегодня)** or **Добавить транзакцию (вчера)** to use that date directly, or choose **Добавить транзакцию** (or `/add`) to enter another date as `ДД.ММ.ГГГГ` (ISO `YYYY-MM-DD` is also accepted). Today/yesterday flows skip the comment question; use **Добавить комментарий** in the confirmation if a note is needed. The persistent keyboard also offers **Аналитика**, **Аналитика по категориям**, **Версия**, **Отменить текущую запись**, **Последние 10 операций**, **Удалить последнюю**, and **Выбрать для удаления**.
 2. Choose expense or income.
 3. For an expense, choose its category and subcategory. For income, choose its source; the saved category is always `Доход`.
-4. Enter a positive integer RUB amount.
+4. Enter a positive integer RUB amount using the inline numeric keypad or by typing the amount as a message. Telegram bots cannot force the phone's system keyboard to switch to numeric mode.
 5. Review the transaction and confirm it. Comments are optional: press **Добавить комментарий** in the confirmation if needed (up to 1000 characters).
 6. Review the full entry and confirm or cancel.
 
-The menu buttons have slash-command equivalents: `/cancel` cancels an in-progress entry, `/help` shows the menu, and `/version` reports the deployed release tag and short source commit. The bot accepts configured Telegram user IDs only in private chats. `TELEGRAM_ALLOWED_USER_ID` uses `GOOGLE_SHEET_ID`; optional `TELEGRAM_USER_SHEETS` adds isolated users in `TELEGRAM_ID:SPREADSHEET_ID` format, with comma-separated entries. Each spreadsheet must grant Editor access to the configured Google service account. Failed/uncertain Sheets writes are not automatically retried, to avoid duplicate transactions; inspect `Траты` before attempting again.
+The category and subcategory choice buttons include matching emoji where known; unknown labels use a neutral marker, while the saved category values remain unchanged. **Удалить последнюю** and **Выбрать для удаления** show the selected transaction and require confirmation. Confirmed deletion removes the entire physical row from that user's `Траты` sheet, shifting subsequent rows. After upgrading, send `/help` once to refresh the persistent menu. The menu buttons have slash-command equivalents: `/cancel` cancels an in-progress entry, `/help` shows the menu, and `/version` reports the deployed release tag and short source commit. The bot accepts configured Telegram user IDs only in private chats. `TELEGRAM_ALLOWED_USER_ID` uses `GOOGLE_SHEET_ID`; optional `TELEGRAM_USER_SHEETS` adds isolated users in `TELEGRAM_ID:SPREADSHEET_ID` format, with comma-separated entries. Each spreadsheet must grant Editor access to the configured Google service account. Failed/uncertain Sheets writes are not automatically retried, to avoid duplicate transactions; inspect `Траты` before attempting again.
 
 **Аналитика** reads the calculated monthly income, expenses, current balance, and category totals from the existing `Аналитика` sheet and sends a donut chart. **Аналитика по категориям** offers Еда офис, Кафе/Рестораны, Транспорт, and Продукты, then reports that category's total and subcategory totals with a chart. The bot only reads this sheet; formulas and source values are maintained in Google Sheets. Set `GOOGLE_ANALYTICS_SHEET` if the tab has a different name.
 
@@ -79,7 +79,7 @@ git push -u origin main
 
 Review `git status` before committing. The `.gitignore` excludes `.env`, credentials in `secrets/`, virtual environments, and CSV exports in `data/`; only `data/categories-template.csv` is kept. Do not force-add private files.
 
-GitHub Actions runs unit tests on pull requests, pushes to `main`, and version tags (`v*`). Pushes to `main` publish and deploy the development image; pushing a version tag also deploys that release image and publishes a GitHub Release.
+GitHub Actions runs unit tests on pull requests, pushes to `main`, and version tags (`v*`). Pushes to `main` publish a development image without deploying it; pushing a version tag deploys that release image and publishes a GitHub Release.
 
 ### Prepare the Ubuntu 24.04 VPS
 
@@ -107,4 +107,4 @@ Set these **repository variables** under **Settings → Secrets and variables �
 - Optional `VPS_PORT` (default `22`) and `VPS_APP_DIR` (default `/opt/financebot`).
 - `ENABLE_VPS_DEPLOY`: set to `true` only after Docker, the server `.env`, credentials file, and all deployment secrets are ready.
 
-Deployment intentionally fails rather than modifying the server if `.env` or the Google key is missing. With `ENABLE_VPS_DEPLOY=true`, pushes to `main` and version tags deploy the exact commit image. Pull requests run tests and build the image but never publish or deploy it. The workflow does not bootstrap Docker or create server credentials.
+Deployment intentionally fails rather than modifying the server if `.env` or the Google key is missing. With `ENABLE_VPS_DEPLOY=true`, only version tags (`v*`) deploy the exact commit image to the VPS; a manual workflow run deploys only when its ref is a version tag. Pushes to `main` run tests and publish a development image but do not change production. Pull requests run tests and build the image but never publish or deploy it. The workflow does not bootstrap Docker or create server credentials.
