@@ -47,6 +47,8 @@ def main():
                 category_change_state_dir=directory,
             )
             store.category_catalog()
+            store.category_change_status(user_id)
+            store.load_taxonomy()
     except Exception as exc:
         reason = failure_reason(exc).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
         print(f"::error title=Release compatibility check::{stage}: {reason}", flush=True)

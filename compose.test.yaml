@@ -1,0 +1,22 @@
+services:
+  bot:
+    image: ghcr.io/sediakinivan/finance-bot:test-${IMAGE_TAG:?Set IMAGE_TAG}
+    container_name: financebot-test
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env.test
+    environment:
+      GOOGLE_CREDENTIALS_FILE: /run/secrets/google-service-account.json
+      CATEGORY_CHANGE_STATE_DIR: /var/lib/financebot/category-changes
+    volumes:
+      - ../secrets/google-service-account.json:/run/secrets/google-service-account.json:ro
+      - ./secrets/category-changes:/var/lib/financebot/category-changes:rw
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

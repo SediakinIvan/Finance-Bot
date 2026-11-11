@@ -1,0 +1,104 @@
+name: Test stand
+
+on:
+  push:
+    tags: ['test-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: financebot-test-stand
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements.txt
+      - name: Verify Python and Apps Script
+        run: |
+          python -m unittest discover -s tests -q
+          node tests/test_apps_script.cjs
+          node tests/test_archive_script.cjs
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/sediakinivan/finance-bot:test-${{ github.sha }}
+          build-args: |
+            APP_VERSION=test-${{ github.ref_name }}
+            GIT_COMMIT=${{ github.sha }}
+
+  deploy-test:
+    name: Deploy isolated test bot
+    needs: build
+    runs-on: ubuntu-latest
+    # Reuse the existing SSH/registry credentials; target only the test subdirectory.
+    environment: production
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST }}
+      VPS_USER: ${{ vars.VPS_USER }}
+      VPS_PORT: ${{ vars.VPS_PORT || '22' }}
+      VPS_APP_DIR: ${{ vars.VPS_APP_DIR || '/opt/financebot' }}
+      VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
+      GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+      TEST_TELEGRAM_BOT_TOKEN: ${{ secrets.TEST_TELEGRAM_BOT_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare and deploy test project only
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${TEST_TELEGRAM_BOT_TOKEN:?Set TEST_TELEGRAM_BOT_TOKEN repository secret}"
+          : "${VPS_SSH_PRIVATE_KEY:?Missing deploy key}"
+          : "${VPS_KNOWN_HOSTS:?Missing known hosts}"
+          : "${GHCR_PULL_TOKEN:?Missing registry token}"
+          [[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$VPS_USER" =~ ^[A-Za-z0-9_.-]+$ ]]
+          [[ "$VPS_PORT" =~ ^[0-9]+$ ]]
+          [[ "$GHCR_USERNAME" =~ ^[A-Za-z0-9-]+$ ]]
+          [[ "$VPS_APP_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]]
+          [[ ! "$VPS_APP_DIR" =~ (^|/)\.\.(/|$) ]]
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"
+          ssh_options=(-i "$RUNNER_TEMP/ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts" -p "$VPS_PORT")
+          remote="$VPS_USER@$VPS_HOST"
+          test_dir="$VPS_APP_DIR/test"
+          ssh "${ssh_options[@]}" "$remote" "umask 077; mkdir -p '$test_dir'; test -f '$VPS_APP_DIR/.env'; test -f '$VPS_APP_DIR/secrets/google-service-account.json'"
+          scp -i "$RUNNER_TEMP/ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts" -P "$VPS_PORT" compose.test.yaml scripts/prepare_test_env.py "$remote:$test_dir/"
+          python3 -c 'import json,os; print(json.dumps({"token":os.environ["TEST_TELEGRAM_BOT_TOKEN"]}))' |
+            ssh "${ssh_options[@]}" "$remote" "python3 '$test_dir/prepare_test_env.py' --production-env '$VPS_APP_DIR/.env' --output '$test_dir/.env.test'"
+          printf '%s\n' "$GHCR_PULL_TOKEN" |
+            ssh "${ssh_options[@]}" "$remote" \
+              "set -eu
+               trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+               docker login ghcr.io --username '$GHCR_USERNAME' --password-stdin
+               cd '$test_dir'
+               IMAGE_TAG='$GITHUB_SHA' docker compose -p financebot-test -f compose.test.yaml pull
+               docker run --rm --user 0:0 --entrypoint sh --volume '$test_dir/secrets/category-changes:/state' ghcr.io/sediakinivan/finance-bot:test-'$GITHUB_SHA' -c 'chown 10001:10001 /state && chmod 700 /state'
+               IMAGE_TAG='$GITHUB_SHA' docker compose -p financebot-test -f compose.test.yaml run --rm --no-deps --entrypoint python bot -m finance_bot.release_check
+               IMAGE_TAG='$GITHUB_SHA' docker compose -p financebot-test -f compose.test.yaml up -d --remove-orphans
+               IMAGE_TAG='$GITHUB_SHA' docker compose -p financebot-test -f compose.test.yaml ps --status running"
