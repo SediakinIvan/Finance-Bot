@@ -38,6 +38,9 @@ from finance_bot.sheets import (
     TransactionRecord,
 )
 from finance_bot.version import version_text
+from finance_bot.taxonomy import new_id
+from finance_bot.v2_sheets import TaxonomyChangedError
+from finance_bot import category_ui
 
 logger = logging.getLogger(__name__)
 ADD_TRANSACTION_BUTTON = "Добавить транзакцию"
@@ -51,12 +54,6 @@ CATEGORY_ANALYTICS_BUTTON = "Аналитика по категориям"
 VERSION_BUTTON = "Версия"
 CANCEL_TRANSACTION_BUTTON = "Отменить текущую запись"
 _MAX_REPLY_TEXT_LENGTH = 2000
-_ANALYTICS_CATEGORIES = (
-    "Еда офис",
-    "Кафе/Рестораны",
-    "Транспорт",
-    "Продукты",
-)
 _MONTH_NAMES = (
     "",
     "январь",
@@ -101,6 +98,11 @@ _FLOW_KEYS = (
     "delete_records",
     "delete_pending",
     "delete_token",
+    "pnl_category_id",
+    "pnl_subcategory_id",
+    "pnl_revision",
+    "pnl_transaction_id",
+    category_ui.FLOW_KEY,
 )
 
 
@@ -121,6 +123,7 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
             [DELETE_LAST_BUTTON, DELETE_RECENT_BUTTON],
             [ANALYTICS_BUTTON, CATEGORY_ANALYTICS_BUTTON],
             [VERSION_BUTTON, CANCEL_TRANSACTION_BUTTON],
+            [category_ui.CATEGORIES_BUTTON],
         ],
         resize_keyboard=True,
         is_persistent=False,
@@ -337,7 +340,7 @@ def _timezone(context: ContextTypes.DEFAULT_TYPE) -> ZoneInfo:
         raise ValueError(f"Unknown BOT_TIMEZONE: {timezone_name}") from exc
 
 
-def _taxonomy(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, str]]:
+def _taxonomy(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, Any]]:
     return context.user_data["pnl_options"]
 
 
@@ -346,11 +349,23 @@ def _set_subcategory(
 ) -> str:
     transaction_type = context.user_data["pnl_type"]
     context.user_data["pnl_subcategory"] = subcategory
-    context.user_data["pnl_category"] = (
-        "Доход"
-        if transaction_type == "Доход"
-        else context.user_data["pnl_category"]
-    )
+    income_matches = [item for item in context.user_data.get("pnl_options", [])
+                      if item["type"] == "Доход" and item["subcategory"] == subcategory]
+    if transaction_type == "Доход":
+        selected = context.user_data.get("pnl_category")
+        context.user_data["pnl_category"] = (
+            selected if any(item["category"] == selected for item in income_matches)
+            else income_matches[0]["category"] if len(income_matches) == 1 else "Доход"
+        )
+    matching = [item for item in context.user_data.get("pnl_options", [])
+                if item["type"] == transaction_type
+                and item["category"] == context.user_data["pnl_category"]
+                and item["subcategory"] == subcategory]
+    if len(matching) == 1 and matching[0].get("category_id"):
+        context.user_data["pnl_category_id"] = matching[0]["category_id"]
+        context.user_data["pnl_subcategory_id"] = matching[0]["subcategory_id"]
+        context.user_data["pnl_revision"] = matching[0]["revision"]
+        context.user_data["pnl_transaction_id"] = new_id()
     context.user_data["pnl_amount_input"] = ""
     context.user_data["pnl_amount_token"] = secrets.token_hex(4)
     return _amount_prompt(context)
@@ -398,6 +413,7 @@ def _confirmation_keyboard(include_add_note: bool = False) -> InlineKeyboardMark
 
 
 async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await category_ui.leave_categories(update, context)
     await update.effective_message.reply_text(
         "Команды:\n"
         f"Кнопка «{ADD_TODAY_TRANSACTION_BUTTON}» — добавить операцию за сегодня\n"
@@ -408,6 +424,7 @@ async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Кнопка «{ANALYTICS_BUTTON}» — сводка за месяц и траты по категориям\n"
         f"Кнопка «{CATEGORY_ANALYTICS_BUTTON}» — аналитика выбранной категории\n"
         f"Кнопка «{VERSION_BUTTON}» или /version — показать версию бота\n"
+        f"Кнопка «{category_ui.CATEGORIES_BUTTON}» или /categories — управление категориями\n"
         f"Кнопка «{CANCEL_TRANSACTION_BUTTON}» или /cancel — отменить текущий ввод\n"
         "/help — показать эту справку\n\n"
         "После заполнения бот покажет строку для подтверждения и добавит её "
@@ -417,6 +434,7 @@ async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def show_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await category_ui.leave_categories(update, context)
     await update.effective_message.reply_text(version_text())
 
 
@@ -454,6 +472,7 @@ def _recent_transaction_messages(records: Sequence[TransactionRecord]) -> list[s
 async def show_recent_transactions(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    await category_ui.leave_categories(update, context)
     try:
         rows = await asyncio.to_thread(_store(context, update).get_recent_transactions)
     except SheetsError as exc:
@@ -483,6 +502,7 @@ def _transaction_details(record: TransactionRecord) -> str:
 async def _start_deletion(
     update: Update, context: ContextTypes.DEFAULT_TYPE, last_only: bool
 ) -> int:
+    await category_ui.leave_categories(update, context)
     _forget_flow(context)
     token = secrets.token_hex(4)
     context.user_data["delete_token"] = token
@@ -661,6 +681,7 @@ def _category_analytics_text(analytics: CategoryAnalytics, period: str) -> str:
 
 
 async def show_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await category_ui.leave_categories(update, context)
     try:
         analytics = await asyncio.to_thread(_store(context, update).get_monthly_analytics)
     except SheetsError as exc:
@@ -679,21 +700,47 @@ async def show_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def show_category_analytics_choices(
-    update: Update, _context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    await category_ui.leave_categories(update, context)
+    if update.callback_query:
+        if await _reject_unauthorized_callback(update, context):
+            return
+        await update.callback_query.answer()
+        page = int(update.callback_query.data.rsplit(":", 1)[1])
+    else:
+        page = 0
+    try:
+        choices = await asyncio.to_thread(_store(context, update).get_analytics_categories)
+    except SheetsError:
+        await update.effective_message.reply_text("Не удалось загрузить категории аналитики. Проверьте таблицу.")
+        return
+    if not choices:
+        await update.effective_message.reply_text("Нет категорий для аналитики.")
+        return
+    pages = (len(choices) + 7) // 8
+    if not 0 <= page < pages:
+        await update.effective_message.reply_text("Список изменился. Откройте аналитику заново.")
+        return
     buttons = [
         InlineKeyboardButton(
             f"{_choice_emoji(category, 'category')} {category}",
-            callback_data=f"analytics:category:{index}",
+            callback_data=f"analytics:category:{category_id}",
         )
-        for index, category in enumerate(_ANALYTICS_CATEGORIES)
+        for category_id, category in choices[page * 8:page * 8 + 8]
     ]
-    keyboard = InlineKeyboardMarkup(
-        [buttons[:2], buttons[2:]]
-    )
-    await update.effective_message.reply_text(
+    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    navigation = []
+    if page:
+        navigation.append(InlineKeyboardButton("Назад", callback_data=f"analytics:page:{page - 1}"))
+    if page + 1 < pages:
+        navigation.append(InlineKeyboardButton("Далее", callback_data=f"analytics:page:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    reply = update.callback_query.edit_message_text if update.callback_query else update.effective_message.reply_text
+    await reply(
         "Выберите категорию:",
-        reply_markup=keyboard,
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
@@ -705,12 +752,7 @@ async def show_category_analytics(
 
     query = update.callback_query
     await query.answer()
-    category_index = int(query.data.rsplit(":", 1)[1])
-    if not 0 <= category_index < len(_ANALYTICS_CATEGORIES):
-        await query.edit_message_text("Не удалось определить категорию. Откройте выбор ещё раз.")
-        return
-
-    category = _ANALYTICS_CATEGORIES[category_index]
+    category = query.data.rsplit(":", 1)[1]
     try:
         analytics = await asyncio.to_thread(
             _store(context, update).get_category_analytics, category
@@ -738,6 +780,7 @@ async def _start_add(
     context: ContextTypes.DEFAULT_TYPE,
     preset_day: str | None = None,
 ) -> int:
+    await category_ui.leave_categories(update, context)
     _forget_flow(context)
     try:
         options: list[CategoryOption] = await asyncio.to_thread(
@@ -756,6 +799,9 @@ async def _start_add(
             "type": option.transaction_type,
             "category": option.category,
             "subcategory": option.subcategory,
+            "category_id": option.category_id,
+            "subcategory_id": option.subcategory_id,
+            "revision": option.revision,
         }
         for option in options
     ]
@@ -819,6 +865,13 @@ async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     options = _taxonomy(context)
 
     if transaction_type == "Доход":
+        categories = sorted({row["category"] for row in options if row["type"] == "Доход"}, key=str.casefold)
+        if len(categories) > 1:
+            context.user_data["pnl_choices"] = categories
+            await query.edit_message_text("Выберите категорию дохода:", reply_markup=_choice_keyboard(categories, "cat"))
+            return State.CATEGORY
+        if categories:
+            context.user_data["pnl_category"] = categories[0]
         choices = sorted(
             {row["subcategory"] for row in options if row["type"] == "Доход"},
             key=str.casefold,
@@ -873,7 +926,7 @@ async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         {
             row["subcategory"]
             for row in _taxonomy(context)
-            if row["type"] == "Расход" and row["category"] == category
+            if row["type"] == context.user_data["pnl_type"] and row["category"] == category
         },
         key=str.casefold,
     )
@@ -1060,7 +1113,18 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     ]
     await query.edit_message_reply_markup(reply_markup=None)
     try:
-        await asyncio.to_thread(_store(context, update).append_transaction, row)
+        selected = context.user_data
+        kwargs = ({
+            "category_id": selected["pnl_category_id"],
+            "subcategory_id": selected["pnl_subcategory_id"],
+            "expected_revision": selected["pnl_revision"],
+            "transaction_id": selected["pnl_transaction_id"],
+        } if selected.get("pnl_category_id") else {})
+        await asyncio.to_thread(_store(context, update).append_transaction, row, **kwargs)
+    except TaxonomyChangedError as exc:
+        await query.message.reply_text(str(exc))
+        _forget_flow(context)
+        return ConversationHandler.END
     except SheetsError as exc:
         logger.warning("Transaction append failed or has an uncertain outcome: %s", exc)
         await query.message.reply_text(
@@ -1076,6 +1140,8 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if category_ui.FLOW_KEY in context.user_data:
+        return await category_ui._close(update, context)
     if update.callback_query:
         if await _reject_unauthorized_callback(update, context):
             return ConversationHandler.END
@@ -1122,11 +1188,14 @@ def build_conversation(settings: Settings) -> ConversationHandler:
         rf"{re.escape(ANALYTICS_BUTTON)}|"
         rf"{re.escape(CATEGORY_ANALYTICS_BUTTON)}|"
         rf"{re.escape(VERSION_BUTTON)}|"
+        rf"{re.escape(category_ui.CATEGORIES_BUTTON)}|"
         rf"{re.escape(CANCEL_TRANSACTION_BUTTON)})$"
     )
     text_input = filters.TEXT & ~filters.COMMAND & ~main_menu_button & authorized
     return ConversationHandler(
         entry_points=[
+            CommandHandler("categories", category_ui.start_categories, filters=authorized),
+            MessageHandler(filters.Regex(rf"^{re.escape(category_ui.CATEGORIES_BUTTON)}$") & authorized, category_ui.start_categories),
             CommandHandler("add", start_add, filters=authorized),
             MessageHandler(
                 filters.Regex(rf"^{re.escape(ADD_TRANSACTION_BUTTON)}$") & authorized,
@@ -1154,6 +1223,7 @@ def build_conversation(settings: Settings) -> ConversationHandler:
             ),
         ],
         states={
+            **category_ui.conversation_states(text_input),
             State.CUSTOM_DATE: [MessageHandler(text_input, receive_custom_date)],
             State.TYPE: [
                 CallbackQueryHandler(choose_type, pattern=r"^type:(expense|income)$")
@@ -1202,6 +1272,7 @@ def build_conversation(settings: Settings) -> ConversationHandler:
                 cancel_current_entry,
             ),
             CallbackQueryHandler(cancel_flow, pattern=r"^flow:cancel$"),
+            CallbackQueryHandler(category_ui.reject_stale_category_callback, pattern=r"^tax:"),
             CallbackQueryHandler(stale_callback),
         ],
         allow_reentry=True,
@@ -1232,9 +1303,10 @@ def register_handlers(application: Application, settings: Settings) -> None:
     application.add_handler(
         CallbackQueryHandler(
             show_category_analytics,
-            pattern=r"^analytics:category:[0-9]+$",
+            pattern=r"^analytics:category:[0-9a-f-]{36}$",
         )
     )
+    application.add_handler(CallbackQueryHandler(show_category_analytics_choices, pattern=r"^analytics:page:[0-9]+$"))
     application.add_handler(
         MessageHandler(
             filters.Regex(rf"^{re.escape(RECENT_TRANSACTIONS_BUTTON)}$") & authorized,
@@ -1252,5 +1324,4 @@ def register_handlers(application: Application, settings: Settings) -> None:
     application.add_handler(CommandHandler(["start", "help"], start_help, filters=authorized))
     application.add_handler(
         CallbackQueryHandler(stale_callback),
-        group=1,
     )
