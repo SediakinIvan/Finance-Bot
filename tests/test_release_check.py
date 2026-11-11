@@ -23,7 +23,7 @@ class ReleaseCheckTests(unittest.TestCase):
 
     def test_each_configured_workbook_is_read_without_polling(self):
         with tempfile.TemporaryDirectory() as directory:
-            settings=SimpleNamespace(category_change_state_dir=Path(directory),authorized_telegram_user_ids={1,2},spreadsheet_id_for_user=lambda user:f'book-{user}',google_credentials_file=Path('key'),transactions_sheet='Траты',categories_sheet='Категории',analytics_sheet='Аналитика')
+            settings=SimpleNamespace(category_change_state_dir=Path(directory),allowed_telegram_user_id=1,authorized_telegram_user_ids={1,2},spreadsheet_id_for_user=lambda user:f'book-{user}',google_credentials_file=Path('key'),transactions_sheet='Траты',categories_sheet='Категории',analytics_sheet='Аналитика')
             with patch('finance_bot.release_check.Settings.from_environment',return_value=settings), patch('finance_bot.release_check.V2GoogleSheetsStore') as store, patch('builtins.print'):
                 main()
                 self.assertEqual(store.return_value.category_catalog.call_count,2)

@@ -36,7 +36,8 @@ def main():
         with NamedTemporaryFile(dir=directory, prefix=".release-check-"):
             pass
         for number, user_id in enumerate(sorted(settings.authorized_telegram_user_ids), 1):
-            stage = f"workbook {number} ({settings.spreadsheet_id_for_user(user_id)})"
+            role = "primary" if user_id == settings.allowed_telegram_user_id else "additional"
+            stage = f"{role} workbook {number} ({settings.spreadsheet_id_for_user(user_id)})"
             store = V2GoogleSheetsStore(
                 credentials_file=str(settings.google_credentials_file),
                 spreadsheet_id=settings.spreadsheet_id_for_user(user_id),

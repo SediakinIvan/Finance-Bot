@@ -145,11 +145,11 @@ jobs:
                trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
                docker login ghcr.io --username '$GHCR_USERNAME' --password-stdin
                cd '$VPS_APP_DIR'
-               IMAGE_TAG='$GITHUB_SHA' docker compose pull
+               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml pull
                docker run --rm --user 0:0 --entrypoint sh --volume '$VPS_APP_DIR/secrets/category-changes:/state' ghcr.io/sediakinivan/finance-bot:'$GITHUB_SHA' -c 'chown 10001:10001 /state && chmod 700 /state'
-               IMAGE_TAG='$GITHUB_SHA' docker compose run --rm --no-deps --entrypoint python bot -m finance_bot.release_check
-               IMAGE_TAG='$GITHUB_SHA' docker compose up -d --remove-orphans
-               IMAGE_TAG='$GITHUB_SHA' docker compose ps --status running"
+               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml run --rm --no-deps --entrypoint python bot -m finance_bot.release_check
+               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml up -d --remove-orphans
+               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml ps --status running"
 
   release:
     name: Publish GitHub release
