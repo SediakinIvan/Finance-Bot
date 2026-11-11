@@ -7,6 +7,8 @@ services:
     env_file:
       - .env
     environment:
+      GOOGLE_SHEET_ID: 1I6_HFCMVmxOD5buP6RdhtfJHld66tj7oMGArpW4AEC4
+      TELEGRAM_USER_SHEETS: ""
       GOOGLE_CREDENTIALS_FILE: /run/secrets/google-service-account.json
     volumes:
       - ./secrets/google-service-account.json:/run/secrets/google-service-account.json:ro
