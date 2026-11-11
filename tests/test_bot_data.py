@@ -483,7 +483,7 @@ class TelegramHandlerTests(unittest.TestCase):
         self.assertEqual(_choice_emoji("Новая категория", "category"), "🏷️")
         self.assertEqual(_choice_emoji("Новая подкатегория", "subcategory"), "🔹")
 
-    def test_help_shows_requested_persistent_menu_buttons(self) -> None:
+    def test_help_shows_requested_dismissible_menu_buttons(self) -> None:
         reply_text = AsyncMock()
         update = SimpleNamespace(
             callback_query=None,
@@ -493,7 +493,10 @@ class TelegramHandlerTests(unittest.TestCase):
         asyncio.run(start_help(update, SimpleNamespace()))
 
         keyboard = reply_text.await_args.kwargs["reply_markup"]
-        self.assertTrue(keyboard.is_persistent)
+        markup = keyboard.to_dict()
+        self.assertIs(markup["is_persistent"], False)
+        self.assertIs(markup["resize_keyboard"], True)
+        self.assertFalse(markup.get("one_time_keyboard", False))
         self.assertEqual(
             [[button.text for button in row] for row in keyboard.keyboard],
             [

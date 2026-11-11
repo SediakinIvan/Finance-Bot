@@ -123,7 +123,7 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
             [VERSION_BUTTON, CANCEL_TRANSACTION_BUTTON],
         ],
         resize_keyboard=True,
-        is_persistent=True,
+        is_persistent=False,
     )
 
 
