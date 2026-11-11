@@ -23,16 +23,12 @@ class CategoryOption:
     transaction_type: str
     category: str
     subcategory: str
-    category_id: str = ""
-    subcategory_id: str = ""
-    revision: int = 0
 
 
 @dataclass(frozen=True)
 class TransactionRecord:
     row_number: int
     values: tuple[str, str, str, str, str, str]
-    transaction_id: str = ""
 
 
 class StaleTransactionError(SheetsError):

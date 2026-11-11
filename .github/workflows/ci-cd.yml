@@ -30,16 +30,8 @@ jobs:
           cache-dependency-path: requirements.txt
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Set up Node for Apps Script contract tests
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - name: Run tests
         run: python -m unittest discover -s tests -v
-      - name: Verify Apps Script reconciliation and archive safety
-        run: |
-          node tests/test_apps_script.cjs
-          node tests/test_archive_script.cjs
       - name: Build container image
         run: docker build --build-arg GIT_COMMIT="$GITHUB_SHA" --tag finance-bot:test .
 
@@ -145,11 +137,9 @@ jobs:
                trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
                docker login ghcr.io --username '$GHCR_USERNAME' --password-stdin
                cd '$VPS_APP_DIR'
-               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml pull
-               docker run --rm --user 0:0 --entrypoint sh --volume '$VPS_APP_DIR/secrets/category-changes:/state' ghcr.io/sediakinivan/finance-bot:'$GITHUB_SHA' -c 'chown 10001:10001 /state && chmod 700 /state'
-               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml run --rm --no-deps --entrypoint python bot -m finance_bot.release_check
-               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml up -d --remove-orphans
-               IMAGE_TAG='$GITHUB_SHA' docker compose -f compose.yaml ps --status running"
+               IMAGE_TAG='$GITHUB_SHA' docker compose pull
+               IMAGE_TAG='$GITHUB_SHA' docker compose up -d --remove-orphans
+               IMAGE_TAG='$GITHUB_SHA' docker compose ps --status running"
 
   release:
     name: Publish GitHub release

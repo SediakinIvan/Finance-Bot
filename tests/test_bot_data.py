@@ -505,7 +505,6 @@ class TelegramHandlerTests(unittest.TestCase):
                 ["Удалить последнюю", "Выбрать для удаления"],
                 ["Аналитика", "Аналитика по категориям"],
                 ["Версия", "Отменить текущую запись"],
-                ["Категории"],
             ],
         )
 
@@ -555,18 +554,13 @@ class TelegramHandlerTests(unittest.TestCase):
             analytics.categories,
         )
 
-    def test_category_analytics_offers_dynamic_categories(self) -> None:
+    def test_category_analytics_offers_requested_categories(self) -> None:
         reply_text = AsyncMock()
-        choices = [(f"00000000-0000-4000-8000-{index:012d}", label)
-                   for index, label in enumerate(("Еда офис", "Кафе/Рестораны", "Транспорт", "Продукты", "Новая категория"))]
-        store = SimpleNamespace(get_analytics_categories=lambda: choices)
         update = SimpleNamespace(
-            callback_query=None,
-            effective_user=SimpleNamespace(id=123456),
-            effective_message=SimpleNamespace(reply_text=reply_text),
+            effective_message=SimpleNamespace(reply_text=reply_text)
         )
-        context = SimpleNamespace(application=SimpleNamespace(bot_data={"sheets_stores": {123456: store}}))
-        asyncio.run(show_category_analytics_choices(update, context))
+
+        asyncio.run(show_category_analytics_choices(update, SimpleNamespace()))
 
         keyboard = reply_text.await_args.kwargs["reply_markup"]
         self.assertEqual(
@@ -576,11 +570,10 @@ class TelegramHandlerTests(unittest.TestCase):
                 for button in row
             ],
             [
-                ("🍱 Еда офис", f"analytics:category:{choices[0][0]}"),
-                ("🍽️ Кафе/Рестораны", f"analytics:category:{choices[1][0]}"),
-                ("🚗 Транспорт", f"analytics:category:{choices[2][0]}"),
-                ("🛒 Продукты", f"analytics:category:{choices[3][0]}"),
-                ("🏷️ Новая категория", f"analytics:category:{choices[4][0]}"),
+                ("🍱 Еда офис", "analytics:category:0"),
+                ("🍽️ Кафе/Рестораны", "analytics:category:1"),
+                ("🚗 Транспорт", "analytics:category:2"),
+                ("🛒 Продукты", "analytics:category:3"),
             ],
         )
 

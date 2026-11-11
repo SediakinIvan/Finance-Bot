@@ -9,7 +9,7 @@ from telegram.ext import Application
 
 from finance_bot.bot import register_handlers
 from finance_bot.config import ConfigurationError, Settings
-from finance_bot.v2_sheets import V2GoogleSheetsStore
+from finance_bot.sheets import GoogleSheetsStore
 
 
 def main() -> None:
@@ -24,13 +24,12 @@ def main() -> None:
 		raise SystemExit(f"Configuration error: {exc}") from exc
 
 	stores = {
-		user_id: V2GoogleSheetsStore(
+		user_id: GoogleSheetsStore(
 			credentials_file=str(settings.google_credentials_file),
 			spreadsheet_id=spreadsheet_id,
 			transactions_sheet=settings.transactions_sheet,
 			categories_sheet=settings.categories_sheet,
 			analytics_sheet=settings.analytics_sheet,
-			category_change_state_dir=settings.category_change_state_dir,
 		)
 		for user_id, spreadsheet_id in {
 			settings.allowed_telegram_user_id: settings.spreadsheet_id,

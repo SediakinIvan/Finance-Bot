@@ -22,7 +22,6 @@ class Settings:
     analytics_sheet: str = "Аналитика"
     timezone: str = "Europe/Moscow"
     additional_user_sheets: dict[int, str] = field(default_factory=dict)
-    category_change_state_dir: Path = Path("secrets/category-changes")
 
     @property
     def authorized_telegram_user_ids(self) -> frozenset[int]:
@@ -104,5 +103,4 @@ class Settings:
             analytics_sheet=os.getenv("GOOGLE_ANALYTICS_SHEET", "Аналитика").strip(),
             timezone=os.getenv("BOT_TIMEZONE", "Europe/Moscow").strip(),
             additional_user_sheets=additional_user_sheets,
-            category_change_state_dir=Path(os.getenv("CATEGORY_CHANGE_STATE_DIR", "secrets/category-changes")).expanduser(),
         )
