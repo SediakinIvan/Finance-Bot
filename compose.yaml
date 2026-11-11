@@ -7,6 +7,8 @@ services:
     env_file:
       - .env
     environment:
+      # Owner-approved v2 workbook; overrides the previous v1 value in .env.
+      GOOGLE_SHEET_ID: 1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA
       GOOGLE_CREDENTIALS_FILE: /run/secrets/google-service-account.json
       CATEGORY_CHANGE_STATE_DIR: /var/lib/financebot/category-changes
     volumes:
