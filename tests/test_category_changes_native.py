@@ -1,3 +1,4 @@
+from dashboard_fixtures import DashboardTarget, attach
 from copy import deepcopy
 from pathlib import Path
 import tempfile
@@ -22,7 +23,7 @@ class NativeCategoryChangeTests(unittest.TestCase):
         request_id = new_id()
         change = prepare_change(source, spreadsheet_id="copy-id", expected_revision=0, request_id=request_id, action="rename", entity_id=registry.categories[0].category_id, name="Покупки")
         current = deepcopy(source)
-        class Target:
+        class Target(DashboardTarget):
             id = "copy-id"
             fail = True
             def values_batch_update(self, body):
@@ -31,8 +32,12 @@ class NativeCategoryChangeTests(unittest.TestCase):
                     title = name[1:-1].replace("''", "'")
                     if title == "Архив" and self.fail:
                         raise RuntimeError("simulated failure on archive rename")
-                    current.sheets[title].cells[_coordinate(cell)] = item["values"][0][0]
+                    coordinate = _coordinate(cell)
+                    value = item["values"][0][0]
+                    if body['valueInputOption'] == 'USER_ENTERED':current.sheets[title].formulas[coordinate]=value
+                    else:current.sheets[title].cells[coordinate]=value
         target = Target()
+        change = attach(change, source, target)
         def write_sheet(_target, sheet):
             current.sheets[sheet.title] = deepcopy(sheet)
         with tempfile.TemporaryDirectory() as directory:
@@ -73,13 +78,17 @@ class NativeCategoryCreateTests(unittest.TestCase):
         source.sheets[LABEL_SHEET]=table_sheet(LABEL_SHEET,labels)
         change=prepare_change(source,spreadsheet_id='copy-id',expected_revision=0,request_id=new_id(),action='create',name='Новая',subcategories=('Первая',))
         current=deepcopy(source);writes=Counter()
-        class Target:
+        class Target(DashboardTarget):
             id='copy-id'
             def values_batch_update(self,body):
                 for item in body['data']:
                     name,cell=item['range'].rsplit('!',1)
                     title=name[1:-1].replace("''", "'")
-                    current.sheets[title].cells[_coordinate(cell)]=item['values'][0][0]
+                    coordinate=_coordinate(cell);value=item['values'][0][0]
+                    if body['valueInputOption']=='USER_ENTERED':current.sheets[title].formulas[coordinate]=value
+                    else:current.sheets[title].cells[coordinate]=value
+        target=Target()
+        change=attach(change,source,target)
         def write_sheet(target,sheet):
             writes[sheet.title]+=1;current.sheets[sheet.title]=deepcopy(sheet)
         def fail_dropdowns(target,output):
@@ -88,10 +97,10 @@ class NativeCategoryCreateTests(unittest.TestCase):
             raise RuntimeError('dropdown service unavailable')
         with tempfile.TemporaryDirectory() as directory:
             with patch('finance_bot.category_changes_native.read_google_spreadsheet',side_effect=lambda _:deepcopy(current)), patch('finance_bot.category_changes_native._write_sheet',side_effect=write_sheet), patch('finance_bot.report_presentation.apply_report_presentation'), patch('finance_bot.category_dropdowns.apply_category_dropdowns',side_effect=fail_dropdowns) as dropdown:
-                with self.assertRaises(RuntimeError):apply_change_to_google_copy(source,change,Target(),Path(directory),confirmed=True,maintenance_confirmed=True)
+                with self.assertRaises(RuntimeError):apply_change_to_google_copy(source,change,target,Path(directory),confirmed=True,maintenance_confirmed=True)
                 counts=writes.copy()
                 dropdown.side_effect=None
-                apply_change_to_google_copy(source,change,Target(),Path(directory),confirmed=True,maintenance_confirmed=True)
+                apply_change_to_google_copy(source,change,target,Path(directory),confirmed=True,maintenance_confirmed=True)
                 for title,count in counts.items():
                     if title != METADATA_SHEET:self.assertEqual(writes[title],count)
                 meta=WorkbookMetadata.from_rows(sheet_rows(current.sheets[METADATA_SHEET]))
@@ -99,3 +108,6 @@ class NativeCategoryCreateTests(unittest.TestCase):
                 self.assertEqual(current.sheets['Траты'].cells[2,4],100)
                 self.assertIn(labels[-1],sheet_rows(current.sheets[LABEL_SHEET]))
                 self.assertNotIn('Архив (удалённый снимок)',current.sheets)
+                self.assertNotIn('Аналитика', writes)
+                self.assertEqual([list(item)[0] for item in target.requests], ['copyPaste', 'updateChartSpec'])
+                self.assertEqual([chart['chartId'] for chart in target.metadata['sheets'][0]['charts']], [81, 82])

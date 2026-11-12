@@ -22,24 +22,29 @@ def apply_change_to_google_copy(
         raise MigrationError("Confirm the exact category plan and suspend manual writes.")
     if fingerprint(source) != change.source_digest or fingerprint(change.output) != change.target_digest:
         raise MigrationError("Category source or plan was modified.")
+    from finance_bot.dashboard_changes import validate_presentation, apply_presentation
     path = directory / (change.request_id + "-native.json")
     current = read_google_spreadsheet(target)
     if path.exists():
         state = json.loads(path.read_text())
-        if state["target_digest"] != change.target_digest or state["source_digest"] != change.source_digest:
+        if (state["target_digest"] != change.target_digest or state["source_digest"] != change.source_digest
+                or state.get("presentation_digest") != change.presentation_digest):
             raise MigrationError("Request ID already belongs to another plan.")
         if state["finished"]:
             meta = WorkbookMetadata.from_rows(sheet_rows(current.sheets[METADATA_SHEET]))
             meta.require_ready(target.id, expected_revision=change.expected_revision + 1)
             return
     else:
+        validate_presentation(target, change.presentation, change.presentation_digest)
         if fingerprint(current) != change.source_digest:
             raise MigrationError("Workbook changed since category preview.")
         meta = WorkbookMetadata.from_rows(sheet_rows(current.sheets[METADATA_SHEET]))
         meta.require_ready(target.id, expected_revision=change.expected_revision)
         state = {"source_digest": change.source_digest, "target_digest": change.target_digest,
+                 "presentation_digest": change.presentation_digest,
                  "completed": [], "finished": False, "source": snapshot_payload(source)}
         _private_json(path, state)
+    validate_presentation(target, change.presentation, change.presentation_digest, resume=True)
     from dataclasses import replace
     meta = WorkbookMetadata.from_rows(sheet_rows(source.sheets[METADATA_SHEET]))
     pending = replace(meta, access_mode=AccessMode.MAINTENANCE, pending_request_id=change.request_id)
@@ -75,7 +80,20 @@ def apply_change_to_google_copy(
                 elif title != "Траты" and isinstance(value, (int, float)):
                     if actual.cells.get(key, "") != value:
                         raise MigrationError("An archive amount changed during maintenance.")
-        if name.startswith("_financebot_") or name in {"Аналитика", "Категории"}:
+        if name == "Аналитика":
+            original = source.sheets[name]
+            raw, formulas = [], []
+            for key in sorted(set(original.cells) | set(expected.cells) | set(original.formulas) | set(expected.formulas)):
+                if key in expected.formulas:
+                    if original.formulas.get(key) != expected.formulas[key]:
+                        formulas.append({"range": _quote(name) + cell_address(*key),
+                                         "values": [[native_formula(expected.formulas[key], target)]]})
+                elif original.cells.get(key, "") != expected.cells.get(key, "") or key in original.formulas:
+                    raw.append({"range": _quote(name) + cell_address(*key), "values": [[expected.cells.get(key, "")]]})
+            for option, changes in (("RAW", raw), ("USER_ENTERED", formulas)):
+                if changes:
+                    target.values_batch_update({"valueInputOption": option, "data": changes})
+        elif name.startswith("_financebot_") or name == "Категории":
             _write_sheet(target, expected)
         else:
             original = source.sheets.get(name)
@@ -88,9 +106,7 @@ def apply_change_to_google_copy(
                 target.values_batch_update({"valueInputOption": "RAW", "data": changes})
         state["completed"].append(name)
         _private_json(path, state)
-    from finance_bot.report_presentation import apply_report_presentation
-    from finance_bot.category_projections import LABEL_SHEET
-    apply_report_presentation(target, change.output.sheets["Аналитика"], sheet_rows(change.output.sheets[LABEL_SHEET]))
+    apply_presentation(target, change.presentation, change.presentation_digest)
     from finance_bot.category_dropdowns import apply_category_dropdowns
     apply_category_dropdowns(target, change.output)
     # Check every cell this plan changes. Formula values require native Sheets

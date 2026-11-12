@@ -11,8 +11,8 @@ from uuid import UUID, uuid5
 from finance_bot.category_migration import WorkbookSnapshot, _coordinate
 from finance_bot.category_projections import (
     LABEL_HEADERS, LABEL_SHEET, SNAPSHOT_HEADERS, SNAPSHOT_SHEET,
-    analytics_sheets, sheet_rows, table_sheet, taxonomy_view,
-    preferred_report_categories, report_label_rows,
+    sheet_rows, table_sheet, taxonomy_view,
+    evolve_analytics,
 )
 from finance_bot.category_schema import (
     AccessMode, METADATA_SHEET, MigrationState, REGISTRY_HEADERS,
@@ -33,6 +33,8 @@ class CategoryChange:
     source_digest: str
     target_digest: str
     output: WorkbookSnapshot
+    presentation: dict | None = None
+    presentation_digest: str = ""
 
 
 def prepare_change(
@@ -136,12 +138,8 @@ def prepare_change(
     ])
     analytics = source.sheets["Аналитика"]
     current_period = Period(int(float(analytics.cell(2, 4))), int(float(analytics.cell(1, 4))))
-    preferred = preferred_report_categories(sheet_rows(source.sheets[LABEL_SHEET]))
-    for projection in analytics_sheets(registry, current_period, preferred_categories=preferred):
+    for projection in evolve_analytics(output, registry, current_period):
         output.sheets[projection.title] = projection
-    output.sheets[LABEL_SHEET] = table_sheet(LABEL_SHEET, [LABEL_HEADERS, *[
-        [item[key] for key in LABEL_HEADERS] for item in labels if item["sheet"] != "Аналитика"
-    ], *report_label_rows(registry, preferred)])
     final_meta = replace(meta, taxonomy_revision=registry.revision)
     output.sheets[METADATA_SHEET] = table_sheet(METADATA_SHEET, final_meta.to_rows())
     return CategoryChange(request_id, spreadsheet_id, expected_revision,

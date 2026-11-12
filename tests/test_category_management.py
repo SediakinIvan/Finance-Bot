@@ -19,7 +19,8 @@ class CategoryManagementTests(unittest.TestCase):
         self.current = prepare_migration(source, self.registry, reviewed).output
         self.current.sheets[METADATA_SHEET] = table_sheet(METADATA_SHEET, WorkbookMetadata('copy-id',2,0,MigrationState.READY,AccessMode.OPEN).to_rows())
         test = self
-        class Store:
+        from dashboard_fixtures import DashboardTarget
+        class Store(DashboardTarget):
             spreadsheet_id = 'copy-id'
             writes = 0
             fail = False
@@ -92,6 +93,28 @@ class CategoryManagementTests(unittest.TestCase):
         with patch.object(self.manager,'_directory',side_effect=CategoryManagementError('Журнал недоступен')):
             with self.assertRaises(CategoryManagementError):self.preview()
         self.assertEqual(self.store.writes,0)
+
+    def test_dashboard_change_between_preview_and_confirm_refuses_before_store_write(self):
+        preview = self.preview()
+        self.store.metadata['sheets'][0]['charts'][0]['spec']['title'] = 'Owner edited'
+        with self.assertRaisesRegex(CategoryManagementError, 'после предпросмотра'):
+            self.manager.apply(preview.request_id)
+        self.assertEqual(self.store.writes, 0)
+
+    def test_old_preview_and_pending_require_explicit_new_preview_or_recovery(self):
+        for status in ('preview', 'applying'):
+            with self.subTest(status=status):
+                preview = self.preview()
+                path = self.manager._directory(preview.request_id) / 'request.json'
+                saved = json.loads(path.read_text())
+                saved['change'].pop('presentation')
+                saved['change'].pop('presentation_digest')
+                saved['status'] = status
+                _private_json(path, saved)
+                with self.assertRaisesRegex(CategoryManagementError, 'Старый'):
+                    self.manager.apply(preview.request_id, resume=status == 'applying')
+                self.assertEqual(json.loads(path.read_text())['status'], 'stale' if status == 'preview' else 'applying')
+        self.assertEqual(self.store.writes, 0)
 
     def test_input_boundaries_and_duplicates(self):
         self.assertEqual(validate_name('  A   B '),'A B')

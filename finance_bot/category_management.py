@@ -1,7 +1,7 @@
 """Private confirmed plans for the Telegram category editor."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
@@ -11,7 +11,7 @@ from finance_bot.category_changes import CategoryChange, prepare_change
 from finance_bot.category_migration import read_google_spreadsheet
 from finance_bot.category_projections import sheet_rows
 from finance_bot.category_schema import METADATA_SHEET, REGISTRY_HEADERS, WorkbookMetadata, parse_registry
-from finance_bot.migration_apply import _private_json, fingerprint, payload_snapshot, snapshot_payload
+from finance_bot.migration_apply import MigrationError, _private_json, fingerprint, payload_snapshot, snapshot_payload
 from finance_bot.sheets import SheetsError
 from finance_bot.taxonomy import Period, TaxonomyError, normalized_name
 
@@ -125,9 +125,16 @@ class CategoryManager:
                 "Ambiguous subcategory name within a category.": "В категории уже есть подкатегория с таким названием. Выберите другое имя.",
                 "Cannot add a subcategory to an inactive parent.": "Нельзя добавить подкатегорию в неактивную категорию.",
                 "Move requires active entities of the same transaction type.": "Для переноса нужны активные категории одного типа операции.",
+                "There is no free space for a new category summary row.": "Нет свободной строки для общей сводки. Таблица не изменена.",
                 "An indexed archive sheet is missing.": "Не удалось переименовать историю: в индексе есть отсутствующий архивный лист. Нужно восстановить архив или согласовать исправление индекса. Таблица не изменена.",
             }
             raise CategoryManagementError(messages.get(str(exc), "Недопустимое изменение: проверьте справочник и индексированные архивы.")) from exc
+        from finance_bot.dashboard_changes import prepare_presentation, digest
+        try:
+            presentation = prepare_presentation(self.store._get_spreadsheet(), source, change.output)
+        except MigrationError as exc:
+            raise CategoryManagementError(str(exc)) from exc
+        change = replace(change, presentation=presentation, presentation_digest=digest(presentation))
         if action == "create":
             text = "Создать: " + params["name"]
             if params.get("parent_id"):
@@ -153,7 +160,8 @@ class CategoryManager:
             "source": snapshot_payload(source), "change": {
                 "request_id": change.request_id, "expected_revision": change.expected_revision,
                 "source_digest": change.source_digest, "target_digest": change.target_digest,
-                "output": snapshot_payload(change.output)}})
+                "output": snapshot_payload(change.output), "presentation": change.presentation,
+                "presentation_digest": change.presentation_digest}})
         return CategoryPreview(request_id, text)
 
     def status(self, request_id: str) -> CategoryPreview:
@@ -177,7 +185,8 @@ class CategoryManager:
             source = payload_snapshot(saved["source"])
             output = payload_snapshot(fields["output"])
             change = CategoryChange(request_id, self.store.spreadsheet_id, fields["expected_revision"],
-                                    fields["source_digest"], fields["target_digest"], output)
+                                    fields["source_digest"], fields["target_digest"], output,
+                                    fields.get("presentation"), fields.get("presentation_digest", ""))
             if fingerprint(source) != change.source_digest or fingerprint(output) != change.target_digest:
                 raise ValueError
         except (KeyError, TypeError, ValueError) as exc:
@@ -187,6 +196,15 @@ class CategoryManager:
             if fingerprint(current) != change.source_digest:
                 saved["status"] = "stale"; _private_json(path, saved)
                 raise StaleCategoryPlan("Данные изменились. Откройте действие заново и подтвердите новый итог.")
+        from finance_bot.dashboard_changes import validate_presentation
+        try:
+            validate_presentation(self.store._get_spreadsheet(), change.presentation,
+                                  change.presentation_digest, resume=resume)
+        except MigrationError as exc:
+            if not resume:
+                saved["status"] = "stale"
+                _private_json(path, saved)
+            raise CategoryManagementError(str(exc)) from exc
         saved["status"] = "applying"; _private_json(path, saved)
         try:
             self.store.apply_category_change(source, change, path.parent, confirmed=True, maintenance_confirmed=True)

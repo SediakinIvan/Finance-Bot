@@ -189,3 +189,61 @@ def analytics_sheets(
         first, last = cell_address(row + 2, column + 1), cell_address(row + 1 + len(children), column + 1)
         summary.formulas[row, column + 1] = f"=SUM({first}:{last})" if children else "=0"
     return summary, details
+
+
+def evolve_analytics(workbook, taxonomy: Taxonomy, period: Period):
+    """Update only the category summary; retain visible blocks and detail rows.
+
+    Bootstrap uses analytics_sheets. Day-to-day mutations preserve the owner's
+    dashboard and the row identities referenced by its existing formulas.
+    """
+    from copy import deepcopy
+    from finance_bot.category_schema import read_table
+
+    labels = read_table(sheet_rows(workbook.sheets[LABEL_SHEET]), LABEL_HEADERS)
+    entries = [item for item in labels if item['sheet'] == 'Аналитика' and item['kind'] == 'category']
+    entries.sort(key=lambda item: _coordinate(str(item['cell'])))
+    if any(_coordinate(str(item['cell'])) != (9 + index, 1) for index, item in enumerate(entries)):
+        raise ValueError('The category summary layout requires recovery.')
+    expenses = [item for item in taxonomy.categories if item.transaction_type == 'Расход']
+    old_ids = [str(item['category_id']) for item in entries]
+    if [item.category_id for item in expenses[:len(old_ids)]] != old_ids:
+        raise ValueError('The category summary identities require recovery.')
+    generated, generated_detail = analytics_sheets(taxonomy, period)
+    summary = deepcopy(workbook.sheets['Аналитика'])
+    for index, category in enumerate(expenses):
+        row = 9 + index
+        if index >= len(old_ids):
+            if any(summary.cell(row, col) not in ('', None) or (row, col) in summary.formulas for col in range(1, 5)):
+                raise ValueError('There is no free space for a new category summary row.')
+            for col in (2, 3):
+                summary.cells.pop((row, col), None)
+                summary.formulas[row, col] = generated.formulas[row, col]
+            entries.append(dict(zip(LABEL_HEADERS, ('Аналитика', cell_address(row, 1), 'category', category.category_id, ''))))
+        summary.cells[row, 1] = category.name
+        summary.cells[row, 4] = category.category_id
+
+    # Preserve service-detail row numbers used by the visible dashboard even
+    # when a new current pair would otherwise precede historical pairs.
+    target_rows = sheet_rows(generated_detail)
+    by_pair = {(str(row[0]), str(row[1])): (number, row) for number, row in enumerate(target_rows[1:], 2)}
+    old_rows = sheet_rows(workbook.sheets[DETAIL_SHEET])
+    if not old_rows or tuple(old_rows[0]) != DETAIL_HEADERS:
+        raise ValueError('The detail layout requires recovery.')
+    order = []
+    for row in old_rows[1:]:
+        pair = (str(row[0]), str(row[1]))
+        if pair not in by_pair or pair in order:
+            raise ValueError('The detail identities require recovery.')
+        order.append(pair)
+    order += [pair for pair in by_pair if pair not in order]
+    detail = table_sheet(DETAIL_SHEET, [DETAIL_HEADERS])
+    for number, pair in enumerate(order, 2):
+        generated_row, values = by_pair[pair]
+        for column, value in enumerate(values[:4], 1):
+            detail.cells[number, column] = value
+        detail.formulas[number, 5] = generated_detail.formulas[generated_row, 5]
+    index_rows = [LABEL_HEADERS, *[[item[key] for key in LABEL_HEADERS] for item in labels
+                                 if not (item['sheet'] == 'Аналитика' and item['kind'] == 'category')],
+                  *[[item[key] for key in LABEL_HEADERS] for item in entries]]
+    return summary, detail, table_sheet(LABEL_SHEET, index_rows)
