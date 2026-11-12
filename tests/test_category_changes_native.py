@@ -129,3 +129,19 @@ class NativeCategoryChangeTests(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertEqual(self.state(change)['last_error']['code'],'google_access')
         self.assertNotIn('token-private',json.dumps(self.state(change)))
+
+    def test_http_code_type_and_error_history_survive_rollback(self):
+        from types import SimpleNamespace
+        class InvalidRange(Exception):response=SimpleNamespace(status_code=400)
+        change=self.rename()
+        self.target.before_native=lambda _:(_ for _ in ()).throw(InvalidRange('private payload'))
+        with self.assertRaises(InvalidRange):self.apply(change)
+        state=self.state(change)
+        self.assertEqual(state['last_error']['http_status'],400)
+        self.assertEqual(state['last_error']['exception_type'],'InvalidRange')
+        self.target.before_native=None
+        self.rollback(change)
+        state=self.state(change)
+        self.assertEqual(state['phase'],'rolled_back')
+        self.assertEqual(state['errors'][0]['http_status'],400)
+        self.assertNotIn('private payload',json.dumps(state))

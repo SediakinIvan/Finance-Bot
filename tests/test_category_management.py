@@ -27,6 +27,12 @@ class CategoryManagementTests(unittest.TestCase):
             def _get_spreadsheet(self): return self
             def _rows(self, title): return sheet_rows(test.current.sheets[title])
             def apply_category_change(self, source, change, directory, **kwargs):
+                from finance_bot.dashboard_changes import validate_presentation
+                from finance_bot.migration_apply import fingerprint,MigrationError
+                resumed=(directory/(change.request_id+'-native.json')).exists()
+                if not resumed and fingerprint(test.current)!=change.source_digest:
+                    raise MigrationError("Данные изменились после предпросмотра.")
+                validate_presentation(self,change.presentation,change.presentation_digest,resume=resumed)
                 self.writes += 1
                 if self.fail:
                     meta = WorkbookMetadata.from_rows(self._rows(METADATA_SHEET))

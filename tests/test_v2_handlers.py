@@ -44,6 +44,16 @@ class V2HandlerTests(unittest.TestCase):
         query.message.reply_text.assert_awaited_once_with("Справочник изменился")
         self.assertFalse(context.user_data)
 
+    def test_prewrite_rejection_does_not_claim_uncertain_write(self):
+        from finance_bot.sheets import TransactionNotWrittenError
+        store=SimpleNamespace(append_transaction=Mock(side_effect=TransactionNotWrittenError("Финансовая запись не отправлена. HTTP 429.")))
+        context=self.context(store)
+        context.user_data.update(pnl_date="11.11.2026",pnl_category="Новая",pnl_subcategory="Первая",pnl_amount=100,pnl_type="Расход")
+        query=SimpleNamespace(from_user=SimpleNamespace(id=1),data="save:yes",answer=AsyncMock(),edit_message_reply_markup=AsyncMock(),message=SimpleNamespace(reply_text=AsyncMock()))
+        asyncio.run(confirm_save(self.update(query),context))
+        query.message.reply_text.assert_awaited_once_with("Финансовая запись не отправлена. HTTP 429.")
+        store.append_transaction.assert_called_once()
+
     def test_category_pages_and_callbacks_use_ids_not_positions(self):
         choices = [(new_id(), f"Категория {number}") for number in range(12)]
         store = SimpleNamespace(get_analytics_categories=lambda: choices)

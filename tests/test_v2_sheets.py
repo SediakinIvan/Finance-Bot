@@ -173,6 +173,59 @@ class V2StoreTests(unittest.TestCase):
         self.assertEqual(sum(any("!A3:K3" in item["range"] for item in body["data"]) for body in calls), 1)
         self.assertEqual(len(self.book.sheets["Траты"].rows), 3)
 
+    def test_first_append_after_reconciling_manual_row_succeeds_without_retry(self):
+        row=self.book.sheets['Траты'].rows[1]
+        row[6:11]=['']*5
+        kwargs=self.append()
+        self.assertEqual(self.book.sheets['Траты'].rows[1][9],'valid')
+        self.assertEqual(self.book.sheets['Траты'].rows[2][8],kwargs['transaction_id'])
+        self.assertEqual(sum(any('!A3:K3' in item['range'] for item in body.get('data',[])) for body in self.book.writes),1)
+
+    def test_unchanged_ledger_reads_do_not_write_service_fields_again(self):
+        self.store.get_recent_transactions()
+        first=len(self.book.writes)
+        self.store.get_recent_transactions()
+        self.assertEqual(len(self.book.writes),first)
+        self.assertEqual(first,0)
+
+    def test_prewrite_quota_failure_is_reported_as_not_written_without_retry(self):
+        from types import SimpleNamespace
+        from finance_bot.sheets import TransactionNotWrittenError
+        class Quota(Exception):response=SimpleNamespace(status_code=429)
+        original=self.store._rows;calls=[]
+        def fail(title):
+            calls.append(title)
+            if title=='Траты':raise Quota('secret API payload')
+            return original(title)
+        self.store._rows=fail
+        with self.assertRaises(TransactionNotWrittenError) as error:self.append()
+        self.assertIn('429',str(error.exception));self.assertNotIn('secret',str(error.exception))
+        self.assertEqual(self.book.writes,[])
+
+
+    def test_append_reads_registry_once_and_keeps_concurrent_input_guard(self):
+        from unittest.mock import Mock
+        option=self.store.load_taxonomy()[0]
+        original=self.store._registry
+        self.store._registry=Mock(wraps=original)
+        self.store.append_transaction(["12.11.2026",option.category,option.subcategory,150,"Расход",""],
+            category_id=option.category_id,subcategory_id=option.subcategory_id,expected_revision=option.revision,transaction_id=new_id())
+        self.assertEqual(self.store._registry.call_count,1)
+
+    def test_own_reconciliation_does_not_mask_a_concurrent_financial_edit(self):
+        from finance_bot.sheets import TransactionNotWrittenError
+        row=self.book.sheets['Траты'].rows[1];row[6:11]=['']*5
+        original=self.book.values_batch_update
+        def write_and_edit(body):
+            original(body)
+            if any('!G2:K2' in item['range'] for item in body['data']):
+                self.book.sheets['Траты'].rows[1][3]=999
+        self.book.values_batch_update=write_and_edit
+        with self.assertRaises(TransactionNotWrittenError):self.append()
+        self.assertEqual(self.book.sheets['Траты'].rows[1][3],999)
+        self.assertEqual(len(self.book.sheets['Траты'].rows),2)
+
+
 
 if __name__ == "__main__":
     unittest.main()

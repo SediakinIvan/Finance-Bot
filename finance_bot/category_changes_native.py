@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import replace
 import json
 import time
+from datetime import datetime, timezone
 
 from finance_bot.category_migration import cell_address, read_google_spreadsheet
 from finance_bot.category_projections import sheet_rows
@@ -16,7 +17,18 @@ from finance_bot.category_journal import (
 )
 from finance_bot.category_native_views import (
     validation_steps, presentation_step, view_state, view_expected,
+    capacity_steps, read_capacity, capacity_matches,
 )
+
+
+def _http_status(error):
+    seen=set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        status=getattr(getattr(error,'response',None),'status_code',None)
+        if isinstance(status,int):return status
+        error=error.__cause__ or error.__context__
+    return None
 
 
 def _transient(error):
@@ -36,15 +48,18 @@ def safe_failure(error, stage, attempts=0):
     if isinstance(error, CategoryConflict):
         return {'stage':error.stage,'code':error.code,'sheet':error.sheet,
                 'cell':cell_address(*error.key) if error.key else '', 'attempts':attempts}
-    status=getattr(getattr(error,'response',None),'status_code',None)
-    code='temporary_google' if _transient(error) else ('google_access' if status in {401,403,404} else 'operation_failed')
-    return {'stage':stage,'code':code,'sheet':'','cell':'','attempts':attempts}
+    status=_http_status(error)
+    code=('google_quota' if status==429 else 'google_request_invalid' if status==400 else
+          'temporary_google' if _transient(error) else 'google_access' if status in {401,403,404} else 'operation_failed')
+    return {'stage':stage,'code':code,'sheet':'','cell':'','attempts':attempts,
+            'http_status':status if isinstance(status,int) else None,'exception_type':type(error).__name__}
 
 
 def diagnostic(error, request_id=""):
     prefix = f"Запрос: {request_id}. " if request_id else ""
     return prefix + (f"Этап: {error.get('stage','unknown')}. Код: {error.get('code','operation_failed')}. "
-            f"Область: {error.get('sheet','')}!{error.get('cell','')}. Попыток: {error.get('attempts',0)}.")
+            f"Область: {error.get('sheet','')}!{error.get('cell','')}. Попыток: {error.get('attempts',0)}. "
+            f"HTTP: {error.get('http_status') or '—'}. Тип: {error.get('exception_type','—')}.")
 
 
 def _signature(state):
@@ -80,7 +95,13 @@ def _run_step(target, step, state, path, *, inverse=False):
     for attempt in range(3):
         step['attempts']=step.get('attempts',0)+1
         try:
-            if step['kind']=='cells':
+            if step['kind']=='capacity':
+                actual=read_capacity(target,step)
+                if capacity_matches(actual,step[side]):
+                    step['phase']='reverted' if inverse else 'verified';_private_json(path,state);return
+                if not capacity_matches(actual,step[other]):
+                    raise CategoryConflict(stage,step['sheet'],code='grid_shrunk')
+            elif step['kind']=='cells':
                 actual=_read_edits(target,step);pending=[]
                 for edit,observed in zip(step['edits'],actual):
                     if observed==edit[side]:continue
@@ -95,7 +116,13 @@ def _run_step(target, step, state, path, *, inverse=False):
                 if actual!=view_expected(step,other):raise CategoryConflict(stage,code='native_view_conflict')
             step['phase']='reverting' if inverse else 'writing'
             _private_json(path,state)  # Must succeed before remote mutation.
-            if step['kind']=='cells':
+            if step['kind']=='capacity':
+                requests=[]
+                for key,dimension in (('rows','ROWS'),('columns','COLUMNS')):
+                    if step[side][key]>actual[key]:
+                        requests.append({'appendDimension':{'sheetId':step['sheet_id'],'dimension':dimension,'length':step[side][key]-actual[key]}})
+                if requests:target.batch_update({'requests':requests})
+            elif step['kind']=='cells':
                 for option in ('RAW','USER_ENTERED'):
                     data=[]
                     for edit in pending:
@@ -108,7 +135,10 @@ def _run_step(target, step, state, path, *, inverse=False):
                 requests=step['inverse' if inverse else 'forward']
                 if requests:target.batch_update({'requests':requests})
             # A successful transport response alone is not a verified result.
-            if step['kind']=='cells':
+            if step['kind']=='capacity':
+                if not capacity_matches(read_capacity(target,step),step[side]):
+                    raise CategoryConflict(stage,step['sheet'],code='grid_readback_mismatch')
+            elif step['kind']=='cells':
                 observed=_read_edits(target,step)
                 for edit,value in zip(step['edits'],observed):
                     if value!=edit[side]:raise CategoryConflict(stage,step['sheet'],tuple(edit['key']),'readback_mismatch')
@@ -116,7 +146,11 @@ def _run_step(target, step, state, path, *, inverse=False):
                 raise CategoryConflict(stage,code='native_readback_mismatch')
             step['phase']='reverted' if inverse else 'verified';_private_json(path,state);return
         except Exception as error:
-            state['last_error']=safe_failure(error,stage,step.get('attempts',0));_private_json(path,state)
+            state['last_error']=safe_failure(error,stage,step.get('attempts',0))
+            if not state['last_error']['sheet']:
+                state['last_error']['sheet']=step.get('sheet','Аналитика' if step['kind']=='presentation' else 'Траты')
+            state.setdefault('errors',[]).append({'time':datetime.now(timezone.utc).isoformat(),**state['last_error']})
+            _private_json(path,state)
             if not _transient(error) or attempt==2:raise
             time.sleep(.25*(2**attempt))
 
@@ -135,12 +169,20 @@ def _meta_step(source, after, name):
 def _meta_from(book):return WorkbookMetadata.from_rows(sheet_rows(book.sheets[METADATA_SHEET]))
 
 
+def _ready_metadata(target):
+    if callable(getattr(type(target),'values_get',None)):
+        result=target.values_get("'_financebot_meta'",params={'valueRenderOption':'UNFORMATTED_VALUE'})
+        rows=[list(row)+['']*(2-len(row)) for row in result.get('values',[])]
+        return WorkbookMetadata.from_rows(rows)
+    return _meta_from(read_google_spreadsheet(target))
+
+
 def _validate_identity(source,change,target):
     if target.id!=change.spreadsheet_id or fingerprint(source)!=change.source_digest or fingerprint(change.output)!=change.target_digest:
         raise CategoryConflict('plan',code='plan_modified')
 
 
-def _load_or_create(source,change,target,directory):
+def _load_or_create(source,change,target,directory,*,current=None):
     path=directory/(change.request_id+'-native.json')
     if path.exists():
         state=json.loads(path.read_text())
@@ -148,19 +190,20 @@ def _load_or_create(source,change,target,directory):
             raise CategoryConflict('journal',code='plan_modified')
         if state.get('version')!=JOURNAL_VERSION:
             if state.get('finished'):
-                meta=_meta_from(read_google_spreadsheet(target));meta.require_ready(target.id,expected_revision=change.expected_revision+1)
+                meta=_meta_from(current if current is not None else read_google_spreadsheet(target));meta.require_ready(target.id,expected_revision=change.expected_revision+1)
                 return path,state
             raise CategoryConflict('journal',code='legacy_pending_requires_operator')
         if (state.get('request_id')!=change.request_id or state.get('spreadsheet_id')!=target.id
                 or state.get('plan_signature')!=_signature(state) or state.get('presentation_digest')!=change.presentation_digest):
             raise CategoryConflict('journal',code='plan_modified')
         return path,state
-    current=read_google_spreadsheet(target)
+    current=current if current is not None else read_google_spreadsheet(target)
     if fingerprint(current)!=change.source_digest:raise CategoryConflict('preview',code='stale_source')
     meta=_meta_from(current);meta.require_ready(target.id,expected_revision=change.expected_revision)
     validate_presentation(target,change.presentation,change.presentation_digest)
     pending=replace(meta,access_mode=AccessMode.MAINTENANCE,pending_request_id=change.request_id)
     steps=cell_steps(source,change.output,target)
+    steps=capacity_steps(target,steps)+steps
     steps += [presentation_step(target,change.presentation),validation_steps(target,change.output)]
     state={'version':JOURNAL_VERSION,'request_id':change.request_id,'spreadsheet_id':target.id,'source_digest':change.source_digest,'target_digest':change.target_digest,
            'presentation_digest':change.presentation_digest,'phase':'applying','finished':False,
@@ -181,18 +224,20 @@ def _require_owner(meta,change,*,allow_ready=False,rollback_revision=None):
 def apply_change_to_google_copy(source, change, target, directory, *, confirmed, maintenance_confirmed):
     if confirmed is not True or maintenance_confirmed is not True:raise MigrationError('Confirm the exact category plan and suspend manual writes.')
     _validate_identity(source,change,target)
-    path,state=_load_or_create(source,change,target,directory)
+    existed=(directory/(change.request_id+'-native.json')).exists()
+    current=read_google_spreadsheet(target)
+    path,state=_load_or_create(source,change,target,directory,current=current)
     if state.get('finished'):
         if state.get('phase')=='rolled_back':raise CategoryConflict('apply',code='already_rolled_back')
-        _meta_from(read_google_spreadsheet(target)).require_ready(target.id,expected_revision=change.expected_revision+1)
+        _ready_metadata(target).require_ready(target.id,expected_revision=change.expected_revision+1)
         return
     if state['phase'].startswith('rollback') or state['phase']=='rolling_back':raise CategoryConflict('apply',code='rollback_in_progress')
     try:
-        current=read_google_spreadsheet(target);meta=_meta_from(current)
+        meta=_meta_from(current)
         _require_owner(meta,change,allow_ready=state['phase']=='finalizing')
         financial_invariants(source,current)
         check_edits(current,state['steps'],target,'preflight')
-        validate_presentation(target,change.presentation,change.presentation_digest,resume=True)
+        if existed:validate_presentation(target,change.presentation,change.presentation_digest,resume=True)
         if state['phase']!='finalizing':_run_step(target,state['pending'],state,path)
         for step in state['steps']:_run_step(target,step,state,path)
         state['stage']='verify';_private_json(path,state)
@@ -213,10 +258,11 @@ def apply_change_to_google_copy(source, change, target, directory, *, confirmed,
             for edit,p in zip(publish['edits'],state['pending']['edits']):edit['before']=p['after']
             state['publish']=publish
         _private_json(path,state);_run_step(target,state['publish'],state,path)
-        _meta_from(read_google_spreadsheet(target)).require_ready(target.id,expected_revision=change.expected_revision+1)
+        _ready_metadata(target).require_ready(target.id,expected_revision=change.expected_revision+1)
         state.update(phase='complete',finished=True,last_error=None);_private_json(path,state)
     except Exception as error:
-        state['last_error']=safe_failure(error,state.get('stage','preflight'),(state.get('last_error') or {}).get('attempts',0))
+        if not state.get('last_error') or isinstance(error,CategoryConflict):
+            state['last_error']=safe_failure(error,state.get('stage','preflight'),(state.get('last_error') or {}).get('attempts',0))
         _private_json(path,state);raise
 
 
@@ -237,6 +283,10 @@ def prepare_rollback(source,change,target,directory):
     _require_owner(_meta_from(current),change,allow_ready=True,rollback_revision=state.get('rollback_revision'))
     projected=rollback_projection(source,change.output,current,state['steps'],target)
     for step in state['steps']:
+        if step['kind']=='capacity':
+            if not capacity_matches(read_capacity(target,step),step['before']):
+                raise CategoryConflict('rollback_preflight',step['sheet'],code='grid_shrunk')
+            continue
         if step['kind']!='cells' and view_state(target,step) not in (view_expected(step,'before'),view_expected(step,'after')):
             if (step['kind']=='validations' and step.get('phase')=='reverted' and state.get('rollback_dropdowns')
                     and view_state(target,step) in (view_expected(state['rollback_dropdowns'],'before'),view_expected(state['rollback_dropdowns'],'after'))):continue
@@ -283,7 +333,9 @@ def rollback_change_to_google_copy(source,change,target,directory,*,confirmed):
             state['rollback_publish']=publish
         state['phase']='rollback_finalizing';_private_json(path,state)
         _run_step(target,state['rollback_publish'],state,path)
-        _meta_from(read_google_spreadsheet(target)).require_ready(target.id,expected_revision=state['rollback_revision'])
+        _ready_metadata(target).require_ready(target.id,expected_revision=state['rollback_revision'])
         state.update(phase='rolled_back',finished=True,last_error=None);_private_json(path,state)
     except Exception as error:
-        state['last_error']=safe_failure(error,state.get('stage','rollback'));_private_json(path,state);raise
+        if not state.get('last_error') or isinstance(error,CategoryConflict):
+            state['last_error']=safe_failure(error,state.get('stage','rollback'))
+        _private_json(path,state);raise

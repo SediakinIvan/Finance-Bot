@@ -233,20 +233,15 @@ class CategoryManager:
         if saved["status"] not in ({"applying"} if resume else {"preview"}):
             raise CategoryManagementError("Этот запрос уже не активен. Откройте «Категории» заново.")
         source, change = self._plan(request_id, saved)
-        if not resume:
-            current = read_google_spreadsheet(self.store._get_spreadsheet())
-            if fingerprint(current) != change.source_digest:
-                saved["status"] = "stale"; _private_json(path, saved)
-                raise StaleCategoryPlan("Данные изменились. Откройте действие заново и подтвердите новый итог.")
-        from finance_bot.dashboard_changes import validate_presentation
-        try:
-            validate_presentation(self.store._get_spreadsheet(), change.presentation,
-                                  change.presentation_digest, resume=resume)
-        except MigrationError as exc:
+        from finance_bot.dashboard_changes import digest
+        if (not change.presentation or change.presentation.get("version") != 1
+                or digest(change.presentation) != change.presentation_digest):
             if not resume:
                 saved["status"] = "stale"
                 _private_json(path, saved)
-            raise CategoryManagementError(str(exc)) from exc
+            raise CategoryManagementError("Старый или повреждённый план диаграмм. Нужен новый предпросмотр; pending требует оператора.")
+        # The native service performs the fresh source/presentation preflight.
+        # Do not repeat an entire workbook read before that same guarded check.
         saved.pop("rollback_confirmation", None)
         saved["status"] = "applying"; _private_json(path, saved)
         try:
@@ -255,7 +250,10 @@ class CategoryManager:
             native = path.parent / (request_id + "-native.json")
             if not native.exists():
                 saved["status"] = "stale"; _private_json(path, saved)
-                raise StaleCategoryPlan("Изменение не начато. Откройте новый предпросмотр.") from exc
+                from finance_bot.category_changes_native import diagnostic, safe_failure
+                detail = (str(exc) if isinstance(exc, MigrationError)
+                          else diagnostic(safe_failure(exc,"preflight"),request_id))
+                raise StaleCategoryPlan("Изменение не начато. " + detail) from exc
             try:
                 state = json.loads(native.read_text())
                 from finance_bot.category_changes_native import diagnostic, safe_failure

@@ -116,3 +116,31 @@ def view_state(target, step):
 def view_expected(step, side):
     if step['kind']=='validations':return step[side]
     return {'charts':step[side], 'formats':[item[side] for item in step['formats']]}
+
+
+def capacity_steps(target, steps):
+    """Grow managed sheets before reading/writing ranges beyond their grid."""
+    metadata=target.fetch_sheet_metadata(params={'fields':'sheets(properties(sheetId,title,gridProperties))'})
+    sheets={s['properties']['title']:s['properties'] for s in metadata['sheets']}
+    result=[]
+    for step in steps:
+        props=sheets[step['sheet']];grid=props['gridProperties']
+        before={'rows':grid['rowCount'],'columns':grid['columnCount']}
+        after={'rows':max(before['rows'],max(e['key'][0] for e in step['edits'])),
+               'columns':max(before['columns'],max(e['key'][1] for e in step['edits']))}
+        if after!=before:
+            result.append({'id':'capacity:'+step['sheet'],'kind':'capacity','sheet':step['sheet'],
+                           'sheet_id':props['sheetId'],'before':before,'after':after,'phase':'prepared'})
+    return result
+
+
+def read_capacity(target, step):
+    metadata=target.fetch_sheet_metadata(params={'fields':'sheets(properties(sheetId,title,gridProperties))'})
+    props=next(s['properties'] for s in metadata['sheets'] if s['properties']['sheetId']==step['sheet_id'])
+    grid=props['gridProperties'];return {'rows':grid['rowCount'],'columns':grid['columnCount']}
+
+
+def capacity_matches(actual, expected):
+    # Extra blank rows must never be removed during compensation: the user may
+    # already have added unrelated data there. Only restore the request's cells.
+    return all(actual[key]>=expected[key] for key in ('rows','columns'))

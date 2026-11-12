@@ -18,6 +18,8 @@ def main() -> None:
 		level=logging.INFO,
 		format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 	)
+	# HTTP request URLs contain bot credentials; never log them at INFO.
+	logging.getLogger("httpx").setLevel(logging.WARNING)
 	try:
 		settings = Settings.from_environment()
 	except ConfigurationError as exc:

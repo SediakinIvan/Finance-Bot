@@ -18,6 +18,10 @@ class SheetsError(RuntimeError):
     """A Google Sheets read or write operation failed."""
 
 
+class TransactionNotWrittenError(SheetsError):
+    """The financial batch was not sent, or Google explicitly rejected it."""
+
+
 @dataclass(frozen=True)
 class CategoryOption:
     transaction_type: str

@@ -34,6 +34,7 @@ from finance_bot.config import Settings
 from finance_bot.sheets import (
     CategoryOption,
     SheetsError,
+    TransactionNotWrittenError,
     StaleTransactionError,
     TransactionRecord,
 )
@@ -1122,6 +1123,10 @@ async def confirm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         } if selected.get("pnl_category_id") else {})
         await asyncio.to_thread(_store(context, update).append_transaction, row, **kwargs)
     except TaxonomyChangedError as exc:
+        await query.message.reply_text(str(exc))
+        _forget_flow(context)
+        return ConversationHandler.END
+    except TransactionNotWrittenError as exc:
         await query.message.reply_text(str(exc))
         _forget_flow(context)
         return ConversationHandler.END

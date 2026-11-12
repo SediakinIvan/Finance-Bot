@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from functools import wraps
 from threading import RLock
 from typing import Any, Sequence
@@ -11,9 +12,9 @@ from finance_bot.analytics import (
     AnalyticsValue, CategoryAnalytics, MonthlyAnalytics, _amount, parse_monthly_analytics,
 )
 from finance_bot.category_projections import DETAIL_HEADERS, DETAIL_SHEET, SNAPSHOT_HEADERS, SNAPSHOT_SHEET, sheet_rows, taxonomy_view
-from finance_bot.category_schema import RegistryReader, SchemaError, TRANSACTION_HEADERS, read_table
+from finance_bot.category_schema import RegistryReader, SchemaError, TRANSACTION_HEADERS, read_table, METADATA_SHEET, WorkbookMetadata
 from finance_bot.ledger import LedgerError, RowIdentity, reconcile_rows, require_valid, resolve_new_pair, sheet_date
-from finance_bot.sheets import CategoryOption, GoogleSheetsStore, SheetsError, StaleTransactionError, TransactionRecord
+from finance_bot.sheets import CategoryOption, GoogleSheetsStore, SheetsError, StaleTransactionError, TransactionRecord, TransactionNotWrittenError
 from finance_bot.taxonomy import Taxonomy, TaxonomyError
 
 
@@ -25,15 +26,32 @@ def _guard(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with self._lock:
+            appending = method.__name__ == "append_transaction"
+            if appending: self._financial_write_started = False
             try:
                 return method(self, *args, **kwargs)
-            except SheetsError:
+            except TaxonomyChangedError:
                 raise
-            except (SchemaError, TaxonomyError, LedgerError) as exc:
-                raise SheetsError("Таблица требует завершения миграции или исправления строк.") from exc
             except Exception as exc:
-                raise SheetsError("Ошибка Google Sheets. Проверьте результат в таблице перед повтором.") from exc
+                from finance_bot.category_changes_native import safe_failure
+                info = safe_failure(exc, method.__name__)
+                if isinstance(exc, SheetsError):
+                    message = str(exc)
+                elif isinstance(exc, (SchemaError, TaxonomyError, LedgerError)):
+                    message = "Таблица требует завершения миграции или исправления строк."
+                else:
+                    logging.getLogger(__name__).warning("Sheets operation=%s code=%s http=%s type=%s",
+                        method.__name__, info["code"], info.get("http_status"), info.get("exception_type"))
+                    message = ("Google Sheets ограничил частоту запросов (HTTP 429). Подождите минуту."
+                               if info.get("http_status") == 429 else
+                               "Ошибка Google Sheets. Проверьте результат в таблице перед повтором.")
+                rejected = info.get("http_status") in {400, 401, 403, 404, 429}
+                if appending and (not self._financial_write_started or rejected):
+                    raise TransactionNotWrittenError("Финансовая запись не отправлена или отклонена Google. " + message) from exc
+                if isinstance(exc, SheetsError): raise
+                raise SheetsError(message) from exc
     return wrapped
+
 
 
 class V2GoogleSheetsStore(GoogleSheetsStore):
@@ -90,14 +108,35 @@ class V2GoogleSheetsStore(GoogleSheetsStore):
             raise SchemaError("The readable category view was edited outside the category service.")
         return registry
 
+    @staticmethod
+    def _canonical_rows(rows):
+        rows = [list(row) for row in rows]
+        while rows and not any(value not in ("", None) for value in rows[-1]):
+            rows.pop()
+        width = max((len(row) for row in rows), default=0)
+        return [row + [""] * (width - len(row)) for row in rows]
+
     def _rows(self, title: str) -> list[list[Any]]:
         book = self._get_spreadsheet()
         if callable(getattr(type(book), "values_get", None)):
-            result = book.values_get("'" + title.replace("'", "''") + "'", params={"valueRenderOption": "UNFORMATTED_VALUE"})
-            rows = result.get("values", [])
-            width = max((len(row) for row in rows), default=0)
-            return [list(row) + [""] * (width - len(row)) for row in rows]
-        return book.worksheet(title).get_all_values(value_render_option="UNFORMATTED_VALUE")
+            result = book.values_get(self._range(title, ""), params={"valueRenderOption": "UNFORMATTED_VALUE"})
+            return self._canonical_rows(result.get("values", []))
+        return self._canonical_rows(book.worksheet(title).get_all_values(value_render_option="UNFORMATTED_VALUE"))
+
+    def _rows_many(self, titles):
+        book = self._get_spreadsheet()
+        if callable(getattr(type(book), "values_batch_get", None)):
+            result = book.values_batch_get([self._range(title, "") for title in titles],
+                                           params={"valueRenderOption": "UNFORMATTED_VALUE"})
+            values = result.get("valueRanges", [])
+            if len(values) != len(titles):
+                raise SheetsError("Не удалось полностью прочитать данные для сверки.")
+            return [self._canonical_rows(item.get("values", [])) for item in values]
+        return [self._rows(title) for title in titles]
+
+    def _require_revision(self, revision):
+        meta = WorkbookMetadata.from_rows(self._rows(METADATA_SHEET))
+        meta.require_ready(self.spreadsheet_id, expected_revision=revision)
 
     def _batch(self, data: list[dict]) -> None:
         self._get_spreadsheet().values_batch_update({"valueInputOption": "RAW", "data": data})
@@ -107,11 +146,11 @@ class V2GoogleSheetsStore(GoogleSheetsStore):
         return "'" + title.replace("'", "''") + "'!" + address
 
     def _ledger(self, registry: Taxonomy):
-        raw = self._rows(self.transactions_sheet)
+        raw, initial_snapshots = self._rows_many((self.transactions_sheet, SNAPSHOT_SHEET))
         if not raw or tuple(raw[0]) != TRANSACTION_HEADERS:
             raise SchemaError("Ledger layout is incompatible with generated analytics.")
         snapshots = {}
-        for item in read_table(self._rows(SNAPSHOT_SHEET), SNAPSHOT_HEADERS):
+        for item in read_table(initial_snapshots, SNAPSHOT_HEADERS):
             identity = RowIdentity(**{key: str(item[key]) for key in SNAPSHOT_HEADERS})
             if identity.transaction_id in snapshots:
                 raise SchemaError("Duplicate saved transaction identity.")
@@ -129,22 +168,31 @@ class V2GoogleSheetsStore(GoogleSheetsStore):
             values = [getattr(item, key) for key in SNAPSHOT_HEADERS]
             if values not in snapshot_values:
                 snapshot_values.append(values)
-        # Do not overwrite a concurrent manual edit or a changed registry.
-        if self._rows(self.transactions_sheet) != raw:
+        # One batched recheck protects input, identity snapshots and revision.
+        latest, meta_rows, saved_rows = self._rows_many((self.transactions_sheet, METADATA_SHEET, SNAPSHOT_SHEET))
+        if latest != raw or saved_rows != initial_snapshots:
             raise SheetsError("Таблица изменилась во время сверки; повторите запрос.")
-        self._registry().assert_scope(self.spreadsheet_id, registry.revision)
-        saved_rows = self._rows(SNAPSHOT_SHEET)
-        snapshot_width = len(SNAPSHOT_HEADERS)
-        snapshot_values += [[""] * snapshot_width] * max(0, len(saved_rows) - len(snapshot_values))
-        identity_sheet = self._get_spreadsheet().worksheet(SNAPSHOT_SHEET)
-        if len(snapshot_values) > identity_sheet.row_count:
-            identity_sheet.add_rows(len(snapshot_values) - identity_sheet.row_count)
-        data = [{"range": self._range(SNAPSHOT_SHEET, f"A1:F{len(snapshot_values)}"), "values": snapshot_values}]
-        if service:
+        WorkbookMetadata.from_rows(meta_rows).require_ready(self.spreadsheet_id, expected_revision=registry.revision)
+        snapshot_values += [[""] * len(SNAPSHOT_HEADERS)] * max(0, len(saved_rows) - len(snapshot_values))
+        data = []
+        if snapshot_values != saved_rows:
+            identity_sheet = self._get_spreadsheet().worksheet(SNAPSHOT_SHEET)
+            if len(snapshot_values) > identity_sheet.row_count:
+                identity_sheet.add_rows(len(snapshot_values) - identity_sheet.row_count)
+            data.append({"range": self._range(SNAPSHOT_SHEET, f"A1:F{len(snapshot_values)}"), "values": snapshot_values})
+        current_service = [(list(row[6:11]) + [""] * 5)[:5] for row in raw[1:]]
+        if service and service != current_service:
             data.append({"range": self._range(self.transactions_sheet, f"G2:K{len(service) + 1}"), "values": service})
-        self._batch(data)
+        if data:
+            self._batch(data)
         require_valid(reconciled)
-        return raw, reconciled
+        # Return the state after *our own* reconciliation, not the stale input.
+        # Append/delete guards must still detect external edits, not this write.
+        synced = [list(row) for row in raw]
+        for index, values in enumerate(service, 1):
+            synced[index] = (synced[index] + [""] * 11)[:11]
+            synced[index][6:11] = values
+        return self._canonical_rows(synced), reconciled
 
     @_guard
     def load_taxonomy(self) -> list[CategoryOption]:
@@ -196,17 +244,18 @@ class V2GoogleSheetsStore(GoogleSheetsStore):
         values = [*row, category_id, subcategory_id, transaction_id, "valid", sheet_date(row[0])]
         check = reconcile_rows([list(TRANSACTION_HEADERS), values], registry, {})
         require_valid(check)
-        self._registry().assert_scope(self.spreadsheet_id, expected_revision)
-        if self._rows(self.transactions_sheet) != raw:
+        meta_rows, latest, saved = self._rows_many((METADATA_SHEET, self.transactions_sheet, SNAPSHOT_SHEET))
+        WorkbookMetadata.from_rows(meta_rows).require_ready(self.spreadsheet_id, expected_revision=expected_revision)
+        if latest != raw:
             raise SheetsError("Таблица изменилась перед записью; повторите ввод.")
         worksheet = self._get_spreadsheet().worksheet(self.transactions_sheet)
         if target > worksheet.row_count:
             worksheet.add_rows(target - worksheet.row_count)
-        saved = self._rows(SNAPSHOT_SHEET)
         identity_sheet = self._get_spreadsheet().worksheet(SNAPSHOT_SHEET)
         if len(saved) + 1 > identity_sheet.row_count:
             identity_sheet.add_rows(len(saved) + 1 - identity_sheet.row_count)
         identity = check[0].identity()
+        self._financial_write_started = True
         self._batch([
             {"range": self._range(self.transactions_sheet, f"A{target}:K{target}"), "values": [values]},
             {"range": self._range(SNAPSHOT_SHEET, f"A{len(saved) + 1}:F{len(saved) + 1}"),
@@ -230,7 +279,7 @@ class V2GoogleSheetsStore(GoogleSheetsStore):
                 or current.transaction_id != record.transaction_id
                 or tuple(str(value) for value in current.values) != record.values):
             raise StaleTransactionError("Selected transaction changed; select it again.")
-        self._registry().assert_scope(self.spreadsheet_id, registry.revision)
+        self._require_revision(registry.revision)
         latest = self._rows(self.transactions_sheet)
         values = latest[record.row_number - 1] if record.row_number <= len(latest) else []
         if tuple(str(value) for value in values[:6]) != record.values or len(values) < 9 or values[8] != record.transaction_id:
