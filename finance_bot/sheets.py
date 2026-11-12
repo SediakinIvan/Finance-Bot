@@ -18,17 +18,25 @@ class SheetsError(RuntimeError):
     """A Google Sheets read or write operation failed."""
 
 
+class TransactionNotWrittenError(SheetsError):
+    """The financial batch was not sent, or Google explicitly rejected it."""
+
+
 @dataclass(frozen=True)
 class CategoryOption:
     transaction_type: str
     category: str
     subcategory: str
+    category_id: str = ""
+    subcategory_id: str = ""
+    revision: int = 0
 
 
 @dataclass(frozen=True)
 class TransactionRecord:
     row_number: int
     values: tuple[str, str, str, str, str, str]
+    transaction_id: str = ""
 
 
 class StaleTransactionError(SheetsError):

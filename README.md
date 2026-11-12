@@ -1,6 +1,13 @@
+---
+owner: пользователь (владелец продукта и окружений)
+updated: 2026-11-12
+---
+
 # Telegram PnL entry bot
 
-A private Telegram bot for guided income/expense entry. It writes confirmed transactions into the first row with an empty `Дата` cell in the existing `Траты` sheet; existing formulas and analysis remain in Google Sheets and are not edited. The bot reads button choices from a separate `Категории` sheet. It does not archive, clear, or otherwise update any other tab.
+A private Telegram bot for guided income/expense entry backed by Google Sheets. This development version requires schema v2: stable category IDs, dynamic analytics, and coordinated Apps Script installation. **Do not deploy it against the existing v1 workbook before migration.** Production currently runs stable main (`v1.5.4`, same application tree as `v1.5.3`). Development runs on the isolated test bot from `feature/manage-categories` (`test-2026-11-12-2`). See [the environment and branch map](openspec/context/09-environments-and-branches.md) before choosing a workbook or deploying.
+
+See [migration and Apps Script installation](docs/category-migration.md) and [v2 schema](docs/category-schema-v2.md). Category management buttons are a later feature; this change provides their underlying services.
 
 ## Current transaction flow
 
@@ -13,17 +20,17 @@ A private Telegram bot for guided income/expense entry. It writes confirmed tran
 
 The category and subcategory choice buttons include matching emoji where known; unknown labels use a neutral marker, while the saved category values remain unchanged. **Удалить последнюю** and **Выбрать для удаления** show the selected transaction and require confirmation. Confirmed deletion removes the entire physical row from that user's `Траты` sheet, shifting subsequent rows. The main menu can be collapsed using Telegram’s keyboard controls and reopened with the keyboard icon or `/help`. It does not request persistent display when the regular keyboard is hidden. After upgrading, send `/help` once to replace the old keyboard with the updated, collapsible menu. The menu buttons have slash-command equivalents: `/cancel` cancels an in-progress entry, `/help` shows the menu, and `/version` reports the deployed release tag and short source commit. The bot accepts configured Telegram user IDs only in private chats. `TELEGRAM_ALLOWED_USER_ID` uses `GOOGLE_SHEET_ID`; optional `TELEGRAM_USER_SHEETS` adds isolated users in `TELEGRAM_ID:SPREADSHEET_ID` format, with comma-separated entries. Each spreadsheet must grant Editor access to the configured Google service account. Failed/uncertain Sheets writes are not automatically retried, to avoid duplicate transactions; inspect `Траты` before attempting again.
 
-**Аналитика** reads the calculated monthly income, expenses, current balance, and category totals from the existing `Аналитика` sheet and sends a donut chart. **Аналитика по категориям** offers Еда офис, Кафе/Рестораны, Транспорт, and Продукты, then reports that category's total and subcategory totals with a chart. The bot only reads this sheet; formulas and source values are maintained in Google Sheets. Set `GOOGLE_ANALYTICS_SHEET` if the tab has a different name.
+**Аналитика** reads the calculated monthly income, expenses, current balance, and category totals from the existing `Аналитика` sheet and sends a donut chart. **Аналитика по категориям** lists categories dynamically, using stable IDs and pages, then reports the selected category's total and subcategory totals with a chart. The bot only reads this sheet; formulas and source values are maintained in Google Sheets. Set `GOOGLE_ANALYTICS_SHEET` if the tab has a different name.
 
 ## One-time setup
 
 ### 1. Prepare Google Sheets
 
-- Keep the existing spreadsheet formulas and analysis as they are.
-- Keep the monthly summary labels (`Расходы за месяц`, `Доход за месяц`, `Остаток на текущий момент`), the `Траты по категориям (за месяц)` table, and `Подкатегории: <категория>` blocks in the `Аналитика` tab. These labels are how the bot locates the calculated results; it does not write to this tab.
-- Add a tab named `Категории` (or set `GOOGLE_CATEGORIES_SHEET` to another name). Copy the contents of [`data/categories-template.csv`](data/categories-template.csv) into it, including the header row. The template is based on the exported transaction history and analysis; edit choices in the live tab to match your canonical categories.
-- The header row must contain `Тип`, `Категория`, and `Подкатегория`. Each option is one row. Supported types are `Расход` and `Доход`. For income, use `Доход` in both type and category columns; subcategory is the income source.
-- The service account needs **Editor** access to the spreadsheet. The bot reads `Категории` and appends rows to `Траты`; it does not create or modify tabs.
+- Start with a native copy of the workbook and a separate native backup. Follow [the migration runbook](docs/category-migration.md), including explicit historical-name mappings and Apps Script verification.
+- Keep user-facing transaction columns A:F in their existing order. Migration adds protected service columns G:K.
+- Edit transactions through the bot or the sheet dropdowns. Category registries and generated views are maintained by services, not by manually adding rows to the registry.
+- The bot verifies schema version, identity scope, revision and readiness before access. Old or unfinished books are rejected rather than written as v2.
+- Share only the intended user spreadsheet with the configured service account. Each authorized Telegram user retains a separate spreadsheet.
 
 ### 2. Create Telegram credentials
 
@@ -108,3 +115,7 @@ Set these **repository variables** under **Settings → Secrets and variables �
 - `ENABLE_VPS_DEPLOY`: set to `true` only after Docker, the server `.env`, credentials file, and all deployment secrets are ready.
 
 Deployment intentionally fails rather than modifying the server if `.env` or the Google key is missing. With `ENABLE_VPS_DEPLOY=true`, only version tags (`v*`) deploy the exact commit image to the VPS; a manual workflow run deploys only when its ref is a version tag. Pushes to `main` run tests and publish a development image but do not change production. Pull requests run tests and build the image but never publish or deploy it. The workflow does not bootstrap Docker or create server credentials.
+
+### Category management (v2)
+
+`/categories` or «Категории» opens creation, renaming, moving and deactivation with explicit confirmation. Existing operations and archive amounts are preserved. See [setup, persistent journal and recovery](docs/category-management.md) before enabling this version. Prepare `secrets/category-changes` for UID 10001; the Compose mount must survive container replacement. Validate on a separate test bot and a migrated v2 copy before the production migration/release.

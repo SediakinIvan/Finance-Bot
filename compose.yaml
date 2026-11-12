@@ -7,11 +7,15 @@ services:
     env_file:
       - .env
     environment:
-      GOOGLE_SHEET_ID: 1I6_HFCMVmxOD5buP6RdhtfJHld66tj7oMGArpW4AEC4
+      # Owner-approved v2 workbook; overrides the previous v1 value in .env.
+      GOOGLE_SHEET_ID: 1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA
+      # Temporarily disabled by the owner until their workbooks migrate to v2.
       TELEGRAM_USER_SHEETS: ""
       GOOGLE_CREDENTIALS_FILE: /run/secrets/google-service-account.json
+      CATEGORY_CHANGE_STATE_DIR: /var/lib/financebot/category-changes
     volumes:
       - ./secrets/google-service-account.json:/run/secrets/google-service-account.json:ro
+      - ./secrets/category-changes:/var/lib/financebot/category-changes:rw
     read_only: true
     tmpfs:
       - /tmp
