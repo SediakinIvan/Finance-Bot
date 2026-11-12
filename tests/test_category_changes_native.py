@@ -20,6 +20,10 @@ class NativeCategoryChangeTests(unittest.TestCase):
         source, registry, reviewed = migration_fixture()
         source = prepare_migration(source, registry, reviewed).output
         source.sheets[METADATA_SHEET] = table_sheet(METADATA_SHEET, WorkbookMetadata("copy-id", 2, 0, MigrationState.READY, AccessMode.OPEN).to_rows())
+        from finance_bot.category_projections import LABEL_SHEET
+        labels=sheet_rows(source.sheets[LABEL_SHEET])
+        labels.append(['Архив (пропавший снимок)','A9','category',registry.categories[0].category_id,''])
+        source.sheets[LABEL_SHEET]=table_sheet(LABEL_SHEET,labels)
         request_id = new_id()
         change = prepare_change(source, spreadsheet_id="copy-id", expected_revision=0, request_id=request_id, action="rename", entity_id=registry.categories[0].category_id, name="Покупки")
         current = deepcopy(source)
@@ -58,6 +62,9 @@ class NativeCategoryChangeTests(unittest.TestCase):
                 apply_change_to_google_copy(source, change, target, root, confirmed=True, maintenance_confirmed=True)
                 self.assertEqual(current.sheets["Архив"].cells[1, 5], "Покупки")
                 self.assertEqual(current.sheets["Архив"].cells[2, 5], 900)
+                self.assertIn(labels[-1],sheet_rows(current.sheets[LABEL_SHEET]))
+                self.assertNotIn('Архив (пропавший снимок)',current.sheets)
+                self.assertEqual(target.requests, [])
                 meta = WorkbookMetadata.from_rows(sheet_rows(current.sheets[METADATA_SHEET]))
                 meta.require_ready("copy-id", expected_revision=1)
                 apply_change_to_google_copy(source, change, target, root, confirmed=True, maintenance_confirmed=True)

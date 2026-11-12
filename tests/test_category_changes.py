@@ -128,9 +128,52 @@ class MissingArchiveCategoryChangeTests(unittest.TestCase):
         self.assertEqual(change.output.sheets['Траты'].cells[2,7],self.parent.category_id)
         self.assertEqual(change.output.sheets['Архив'],self.book.sheets['Архив'])
 
-    def test_rename_still_refuses_missing_archive_before_mutation(self):
-        self.add_missing_archive_reference()
-        before=fingerprint(self.book)
-        with self.assertRaisesRegex(ValueError,'indexed archive sheet is missing'):
-            self.plan('rename',entity_id=self.parent.category_id,name='Покупки')
-        self.assertEqual(fingerprint(self.book),before)
+    def test_rename_category_and_child_active_or_inactive_preserves_history(self):
+        for inactive in (False, True):
+            for child in (False, True):
+                self.setUp()
+                if inactive:
+                    self.book=self.plan('deactivate',entity_id=self.parent.category_id,period=Period(2026,11)).output
+                missing=self.add_missing_archive_reference()
+                before=fingerprint(self.book)
+                meta=WorkbookMetadata.from_rows(sheet_rows(self.book.sheets[METADATA_SHEET]))
+                entity=self.child.subcategory_id if child else self.parent.category_id
+                change=prepare_change(self.book,spreadsheet_id='copy-id',expected_revision=meta.taxonomy_revision,request_id=new_id(),action='rename',entity_id=entity,name='Новое имя')
+                self.assertEqual(change.output.sheets['Траты'].cells[2,3 if child else 2],'Новое имя')
+                self.assertEqual(change.output.sheets['Траты'].cells[2,4],100)
+                self.assertEqual(change.output.sheets['Траты'].cells[2,1],self.book.sheets['Траты'].cells[2,1])
+                self.assertEqual(change.output.sheets['Траты'].cells[2,7],self.parent.category_id)
+                self.assertEqual(change.output.sheets['Траты'].cells[2,8],self.child.subcategory_id)
+                self.assertEqual(change.output.sheets['Архив'].cells[2,5],900)
+                if not child:self.assertEqual(change.output.sheets['Архив'].cells[1,5],'Новое имя')
+                self.assertIn(missing,sheet_rows(change.output.sheets[LABEL_SHEET]))
+                self.assertEqual(change.missing_archives,(missing[0],))
+                self.assertNotIn(missing[0],change.output.sheets)
+                self.assertEqual(fingerprint(self.book),before)
+
+    def test_missing_unknown_or_required_sheet_and_corrupt_existing_label_refuse(self):
+        for mode in ('unknown','required','formula','kind','id'):
+            self.setUp()
+            rows=sheet_rows(self.book.sheets[LABEL_SHEET])
+            if mode=='unknown':rows.append(['Другой лист','A9','category',self.parent.category_id,''])
+            if mode=='required':self.book.sheets.pop('Архив')
+            if mode=='formula':self.book.sheets['Архив'].formulas[1,5]='=123'
+            if mode=='kind':rows.append(['Архив','A1','unknown',self.parent.category_id,''])
+            if mode=='id':rows.append(['Архив','A1','category',new_id(),''])
+            self.book.sheets[LABEL_SHEET]=table_sheet(LABEL_SHEET,rows)
+            before=fingerprint(self.book)
+            with self.assertRaises(ValueError):self.plan('rename',entity_id=self.parent.category_id,name='Новое имя')
+            self.assertEqual(fingerprint(self.book),before)
+
+    def test_rename_moved_child_skips_unrelated_archive_and_keeps_original_parent(self):
+        self.book=self.plan('create',name='Получатель',subcategories=('Другая',)).output
+        meta=WorkbookMetadata.from_rows(sheet_rows(self.book.sheets[METADATA_SHEET]))
+        registry=parse_registry(meta,{key:sheet_rows(self.book.sheets[key]) for key in REGISTRY_HEADERS})
+        target=registry.categories[-1]
+        self.book=prepare_change(self.book,spreadsheet_id='copy-id',expected_revision=1,request_id=new_id(),action='move',entity_id=self.child.subcategory_id,parent_id=target.category_id).output
+        rows=sheet_rows(self.book.sheets[LABEL_SHEET]);rows.append(['Архив (другая категория)','A9','category',target.category_id,''])
+        self.book.sheets[LABEL_SHEET]=table_sheet(LABEL_SHEET,rows)
+        change=prepare_change(self.book,spreadsheet_id='copy-id',expected_revision=2,request_id=new_id(),action='rename',entity_id=self.child.subcategory_id,name='Переименована')
+        self.assertEqual(change.output.sheets['Траты'].cells[2,3],'Переименована')
+        self.assertEqual(change.output.sheets['Траты'].cells[2,7],self.parent.category_id)
+        self.assertEqual(change.output.sheets['Траты'].cells[2,4],100)

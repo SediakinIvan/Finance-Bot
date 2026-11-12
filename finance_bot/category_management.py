@@ -151,6 +151,9 @@ class CategoryManager:
             text = f"Удалить из новых вариантов: {entity.name}\nИстория и архивы сохранятся."
             if hasattr(entity, "category_id"):
                 text += f"\nПериод: {period}. После него архивная колонка заполняется нулями."
+        if change.missing_archives:
+            text += (f"\nВнимание: отсутствующих архивных снимков — {len(change.missing_archives)}. "
+                     "Они пропущены и не восстановлены; названия обновятся только в существующих листах.")
         affected = sum(source.sheets.get(name) != sheet for name, sheet in change.output.sheets.items()
                        if name == "Траты" or name == "Архив" or name.startswith("Архив ("))
         text += f"\nЗатронутых листов операций/архивов: {affected}. Суммы сохраняются."
@@ -161,7 +164,7 @@ class CategoryManager:
                 "request_id": change.request_id, "expected_revision": change.expected_revision,
                 "source_digest": change.source_digest, "target_digest": change.target_digest,
                 "output": snapshot_payload(change.output), "presentation": change.presentation,
-                "presentation_digest": change.presentation_digest}})
+                "presentation_digest": change.presentation_digest, "missing_archives": list(change.missing_archives)}})
         return CategoryPreview(request_id, text)
 
     def status(self, request_id: str) -> CategoryPreview:
@@ -186,7 +189,8 @@ class CategoryManager:
             output = payload_snapshot(fields["output"])
             change = CategoryChange(request_id, self.store.spreadsheet_id, fields["expected_revision"],
                                     fields["source_digest"], fields["target_digest"], output,
-                                    fields.get("presentation"), fields.get("presentation_digest", ""))
+                                    fields.get("presentation"), fields.get("presentation_digest", ""),
+                                    tuple(fields.get("missing_archives", ())))
             if fingerprint(source) != change.source_digest or fingerprint(output) != change.target_digest:
                 raise ValueError
         except (KeyError, TypeError, ValueError) as exc:

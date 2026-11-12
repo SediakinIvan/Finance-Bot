@@ -35,6 +35,7 @@ class CategoryChange:
     output: WorkbookSnapshot
     presentation: dict | None = None
     presentation_digest: str = ""
+    missing_archives: tuple[str, ...] = ()
 
 
 def prepare_change(
@@ -109,10 +110,18 @@ def prepare_change(
     labels = read_table(sheet_rows(output.sheets[LABEL_SHEET]), LABEL_HEADERS)
     # Only rename changes historical labels. Other actions must not depend
     # on old snapshots that may no longer exist in the workbook.
+    missing_archives = set()
     if action == "rename":
+        for required in ("Аналитика", "Архив", *REGISTRY_HEADERS):
+            if required not in output.sheets:
+                raise ValueError("A required finance sheet is missing.")
         for item in labels:
             sheet = output.sheets.get(str(item["sheet"]))
             if sheet is None:
+                title = str(item["sheet"])
+                if title.startswith("Архив (") and title.endswith(")") and title[7:-1].strip():
+                    missing_archives.add(title)
+                    continue
                 raise ValueError("An indexed archive sheet is missing.")
             key = _coordinate(str(item["cell"]))
             parent = registry.category(str(item["category_id"]))
@@ -143,7 +152,7 @@ def prepare_change(
     final_meta = replace(meta, taxonomy_revision=registry.revision)
     output.sheets[METADATA_SHEET] = table_sheet(METADATA_SHEET, final_meta.to_rows())
     return CategoryChange(request_id, spreadsheet_id, expected_revision,
-                          fingerprint(source), fingerprint(output), output)
+                          fingerprint(source), fingerprint(output), output, missing_archives=tuple(sorted(missing_archives)))
 
 
 def apply_change_to_copy(

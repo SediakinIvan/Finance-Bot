@@ -169,11 +169,38 @@ class CategoryManagementTests(unittest.TestCase):
             self.manager.preview(action='move',entity_id=child.subcategory_id,parent_id=registry.categories[-1].category_id)
         self.assertEqual(self.store.writes,before)
 
-    def test_missing_archive_rename_is_actionable_and_does_not_write(self):
+    def add_missing_archive(self):
         from finance_bot.category_projections import LABEL_SHEET
         rows=sheet_rows(self.current.sheets[LABEL_SHEET])
-        rows.append(['Архив (удалённый снимок)','A9','category',self.registry.categories[0].category_id,''])
+        rows.extend([['Архив (удалённый снимок)','A9','category',self.registry.categories[0].category_id,'']]*2)
         self.current.sheets[LABEL_SHEET]=table_sheet(LABEL_SHEET,rows)
-        with self.assertRaisesRegex(CategoryManagementError,'отсутствующий архивный лист'):
-            self.preview()
+
+    def test_missing_archive_warning_is_confirmed_deduplicated_and_cancellable(self):
+        self.add_missing_archive()
+        preview=self.preview()
+        self.assertIn('снимков — 1',preview.text)
+        self.assertIn('не восстановлены',preview.text)
+        self.assertEqual(self.store.writes,0)
+        path=self.manager._directory(preview.request_id)/'request.json'
+        saved=json.loads(path.read_text())
+        self.assertEqual(saved['text'],preview.text)
+        self.assertEqual(saved['change']['missing_archives'],['Архив (удалённый снимок)'])
+        self.manager.cancel(preview.request_id)
+        with self.assertRaises(CategoryManagementError):self.manager.apply(preview.request_id)
+        self.assertEqual(self.store.writes,0)
+        preview=self.preview()
+        self.manager.apply(preview.request_id)
+        self.assertEqual(self.current.sheets['Траты'].cells[2,2],'Покупки')
+        self.assertNotIn('Архив (удалённый снимок)',self.current.sheets)
+
+    def test_restored_archive_or_changed_index_invalidates_rename_confirmation(self):
+        from finance_bot.category_projections import LABEL_SHEET
+        self.add_missing_archive()
+        preview=self.preview()
+        self.current.sheets['Архив (удалённый снимок)']=table_sheet('Архив (удалённый снимок)',[['restored']])
+        with self.assertRaises(StaleCategoryPlan):self.manager.apply(preview.request_id)
+        self.current.sheets.pop('Архив (удалённый снимок)')
+        preview=self.preview()
+        self.current.sheets[LABEL_SHEET].cells[2,2]='A2'
+        with self.assertRaises(StaleCategoryPlan):self.manager.apply(preview.request_id)
         self.assertEqual(self.store.writes,0)
