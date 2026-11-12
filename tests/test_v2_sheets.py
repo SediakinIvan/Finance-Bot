@@ -226,6 +226,22 @@ class V2StoreTests(unittest.TestCase):
         self.assertEqual(len(self.book.sheets['Траты'].rows),2)
 
 
+    def test_api_sheet_only_ranges_are_valid_without_trailing_separator(self):
+        original=self.book
+        class ApiBook(FakeBook):
+            def values_get(self,area,params=None):
+                assert not area.endswith('!'),area
+                assert area.startswith("'") and area.endswith("'"),area
+                title=area[1:-1].replace("''", "'")
+                return {'values':deepcopy(self.sheets[title].rows)}
+            def values_batch_get(self,areas,params=None):
+                return {'valueRanges':[self.values_get(area,params) for area in areas]}
+        native=ApiBook.__new__(ApiBook);native.__dict__=original.__dict__
+        self.store._spreadsheet=native
+        self.assertTrue(self.store.load_taxonomy())
+        self.assertEqual(self.store._rows_many((METADATA_SHEET,'Траты'))[1],self.store._rows('Траты'))
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -143,7 +143,8 @@ class V2GoogleSheetsStore(GoogleSheetsStore):
 
     @staticmethod
     def _range(title: str, address: str) -> str:
-        return "'" + title.replace("'", "''") + "'!" + address
+        quoted = "'" + title.replace("'", "''") + "'"
+        return quoted + ("!" + address if address else "")
 
     def _ledger(self, registry: Taxonomy):
         raw, initial_snapshots = self._rows_many((self.transactions_sheet, SNAPSHOT_SHEET))
