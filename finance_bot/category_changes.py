@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Callable
 from uuid import UUID, uuid5
 
-from finance_bot.category_migration import WorkbookSnapshot, _coordinate
+from finance_bot.category_migration import WorkbookSnapshot, _coordinate, cell_address
 from finance_bot.category_projections import (
-    LABEL_HEADERS, LABEL_SHEET, SNAPSHOT_HEADERS, SNAPSHOT_SHEET,
+    ARCHIVE_COLUMNS_SHEET, LABEL_HEADERS, LABEL_SHEET, SNAPSHOT_HEADERS, SNAPSHOT_SHEET,
     sheet_rows, table_sheet, taxonomy_view,
     evolve_analytics,
 )
@@ -69,6 +69,20 @@ def prepare_change(
         else:
             original.subcategory(entity_id)
             children = [replace(item, name=name) if item.subcategory_id == entity_id else item for item in children]
+    elif action == "reactivate":
+        if any(item.category_id == entity_id for item in parents):
+            parent = original.category(entity_id)
+            if parent.active:
+                raise ValueError("Entity is already active.")
+            parents = [replace(item, active=True, deactivated_period=None) if item.category_id == entity_id else item for item in parents]
+            children = [replace(item, active=True) if item.current_category_id == entity_id else item for item in children]
+        else:
+            child = original.subcategory(entity_id)
+            if child.active:
+                raise ValueError("Entity is already active.")
+            if not original.category(child.current_category_id).active:
+                raise ValueError("Reactivate the parent category first.")
+            children = [replace(item, active=True) if item.subcategory_id == entity_id else item for item in children]
     elif action == "move":
         child, parent = original.subcategory(entity_id), original.category(parent_id)
         old_parent = original.category(child.current_category_id)
@@ -115,6 +129,28 @@ def prepare_change(
         for required in ("Аналитика", "Архив", *REGISTRY_HEADERS):
             if required not in output.sheets:
                 raise ValueError("A required finance sheet is missing.")
+        columns = read_table(sheet_rows(output.sheets[ARCHIVE_COLUMNS_SHEET]), ("category_id", "column"))
+        ids, positions = set(), set()
+        for entry in columns:
+            key = str(entry["category_id"])
+            number = str(entry["column"])
+            if not number.isdecimal() or int(number) <= 4:
+                raise ValueError("Invalid archive column mapping.")
+            column = int(number)
+            if key in ids or column in positions or column > max((col for _, col in output.sheets["Архив"].cells), default=0):
+                raise ValueError("Ambiguous archive column mapping.")
+            parent = registry.category(key)
+            if parent.transaction_type != "Расход":
+                raise ValueError("Invalid archive column mapping.")
+            ids.add(key); positions.add(column)
+            address = cell_address(1, column)
+            matching = [item for item in labels if item["sheet"] == "Архив" and item["cell"] == address]
+            if any(item["kind"] != "category" or item["category_id"] != key for item in matching):
+                raise ValueError("Conflicting archive label mapping.")
+            if not matching:
+                labels.append(dict(zip(LABEL_HEADERS, ("Архив", address, "category", key, ""))))
+        output.sheets[LABEL_SHEET] = table_sheet(LABEL_SHEET, [LABEL_HEADERS, *[
+            [item[key] for key in LABEL_HEADERS] for item in labels]])
         for item in labels:
             sheet = output.sheets.get(str(item["sheet"]))
             if sheet is None:

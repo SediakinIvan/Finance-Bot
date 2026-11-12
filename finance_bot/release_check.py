@@ -46,14 +46,19 @@ def main():
                 analytics_sheet=settings.analytics_sheet,
                 category_change_state_dir=directory,
             )
-            store.category_catalog()
-            store.category_change_status(user_id)
-            store.load_taxonomy()
+            pending = store.category_change_status(user_id)
+            if pending is not None:
+                stage = f"{role} workbook {number}: recovery journal compatibility"
+                if store.category_recovery_ready(user_id) is not True:
+                    raise SchemaError("Pending request requires operator recovery before release.")
+            else:
+                store.category_catalog()
+                store.load_taxonomy()
     except Exception as exc:
         reason = failure_reason(exc).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
         print(f"::error title=Release compatibility check::{stage}: {reason}", flush=True)
         raise SystemExit("Release blocked before container replacement.") from None
-    print("Release check passed: all configured workbooks are v2/ready; journal is writable.")
+    print("Release check passed: all configured workbooks are v2/ready or have a supported recovery journal; journal is writable.")
 
 
 if __name__ == "__main__":

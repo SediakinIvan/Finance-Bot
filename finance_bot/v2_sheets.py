@@ -69,6 +69,18 @@ class V2GoogleSheetsStore(GoogleSheetsStore):
     def cancel_category_change(self, owner_id, request_id):
         self._category_manager(owner_id).cancel(request_id)
 
+    @_guard
+    def preview_category_rollback(self, owner_id, request_id):
+        return self._category_manager(owner_id).preview_rollback(request_id)
+
+    @_guard
+    def rollback_category_change(self, owner_id, request_id, *, confirmed=False, resume=False):
+        return self._category_manager(owner_id).rollback(request_id, confirmed=confirmed, resume=resume)
+
+    @_guard
+    def category_recovery_ready(self, owner_id):
+        return self._category_manager(owner_id).recovery_ready()
+
     def _registry(self) -> Taxonomy:
         registry = RegistryReader(self._get_spreadsheet(), self.spreadsheet_id).load()
         view = self._rows(self.categories_sheet)

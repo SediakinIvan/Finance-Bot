@@ -193,3 +193,50 @@ class CategoryUITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('не откатывает',closed.effective_message.reply_text.await_args.args[0])
         self.store.cancel_category_change.assert_not_called()
         closed.callback_query.edit_message_text.assert_not_awaited()
+
+    async def test_rollback_has_separate_confirmation_and_stale_buttons_do_not_apply(self):
+        request=new_id();self.store.category_change_status.return_value=CategoryPreview(request,'pending','applying')
+        self.store.preview_category_rollback=Mock(return_value=CategoryPreview(request,'Подтвердить откат?','rollback_preview'))
+        self.store.rollback_category_change=Mock(return_value=CategoryPreview(request,'Отменено','rolled_back'))
+        await self.start();self.assertIn('rollback',self.actions())
+        await self.click('rollback')
+        self.store.rollback_category_change.assert_not_called()
+        self.assertIn('confirm_rollback',self.actions())
+        old='tax:'+self.context.user_data[ui.FLOW_KEY]['token']+':confirm_rollback'
+        await self.click('confirm_rollback')
+        await ui.handle_category_callback(self.make_update(old),self.context)
+        self.store.rollback_category_change.assert_called_once_with(1,request,confirmed=True,resume=False)
+        self.store.confirm_category_change.assert_not_called()
+
+    async def test_declining_rollback_and_restarting_rolling_back_are_distinct(self):
+        request=new_id();self.store.category_change_status.return_value=CategoryPreview(request,'pending','applying')
+        self.store.preview_category_rollback=Mock(return_value=CategoryPreview(request,'rollback?','rollback_preview'))
+        self.store.rollback_category_change=Mock(return_value=CategoryPreview(request,'Отменено','rolled_back'))
+        await self.start();await self.click('rollback');await self.click('cancel')
+        self.store.rollback_category_change.assert_not_called();self.store.cancel_category_change.assert_not_called()
+        self.store.category_change_status.return_value=CategoryPreview(request,'pending','rolling_back')
+        await self.start();self.assertNotIn('resume',self.actions());self.assertIn('resume_rollback',self.actions())
+        await self.click('resume_rollback')
+        self.store.rollback_category_change.assert_called_once_with(1,request,confirmed=True,resume=True)
+
+    async def test_conflict_and_unsupported_journal_actions(self):
+        self.store.category_change_status.return_value=CategoryPreview(new_id(),'conflict','conflict')
+        await self.start();self.assertNotIn('resume',self.actions());self.assertIn('rollback',self.actions())
+        self.store.category_change_status.return_value=CategoryPreview(new_id(),'operator','operator_required')
+        await self.start();self.assertNotIn('resume',self.actions());self.assertNotIn('rollback',self.actions())
+
+    async def test_inactive_category_and_child_have_confirmed_reactivation(self):
+        await self.start();await self.click('filter');await self.click('c:'+self.inactive.category_id)
+        self.assertIn('reactivate',self.actions())
+        await self.click('reactivate')
+        self.store.preview_category_change.assert_called_with(1,action='reactivate',entity_id=self.inactive.category_id)
+        self.store.confirm_category_change.assert_not_called()
+        await self.click('cancel');self.store.confirm_category_change.assert_not_called()
+        from dataclasses import replace
+        child=replace(self.children[0],active=False)
+        self.store.category_catalog.return_value=Taxonomy('test',1,self.registry.categories,(child,))
+        await self.start();await self.click('c:'+self.parents[0].category_id);await self.click('childfilter')
+        await self.click('s:'+child.subcategory_id)
+        self.assertIn('reactivate',self.actions());await self.click('reactivate');await self.click('confirm')
+        self.store.preview_category_change.assert_called_with(1,action='reactivate',entity_id=child.subcategory_id)
+        self.store.confirm_category_change.assert_called_once()

@@ -204,3 +204,17 @@ class CategoryManagementTests(unittest.TestCase):
         self.current.sheets[LABEL_SHEET].cells[2,2]='A2'
         with self.assertRaises(StaleCategoryPlan):self.manager.apply(preview.request_id)
         self.assertEqual(self.store.writes,0)
+
+    def test_reactivation_preview_lists_all_children_and_is_cancellable(self):
+        parent=self.registry.categories[0]
+        preview=self.manager.preview(action='deactivate',entity_id=parent.category_id)
+        self.manager.apply(preview.request_id)
+        preview=self.manager.preview(action='reactivate',entity_id=parent.category_id)
+        self.assertIn('все текущие подкатегории (1)',preview.text)
+        self.assertIn(self.registry.subcategories[0].name,preview.text)
+        before=self.store.writes;self.manager.cancel(preview.request_id)
+        self.assertEqual(self.store.writes,before)
+        preview=self.manager.preview(action='reactivate',entity_id=parent.category_id)
+        self.manager.apply(preview.request_id)
+        self.assertEqual(self.current.sheets['_financebot_categories'].cells[2,4],True)
+        self.assertEqual(self.current.sheets['Архив'].cells[2,5],900)

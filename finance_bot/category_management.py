@@ -101,7 +101,7 @@ class CategoryManager:
         meta.require_ready(self.store.spreadsheet_id)
         registry = parse_registry(meta, {name: sheet_rows(source.sheets[name]) for name in REGISTRY_HEADERS})
         action = params.get("action")
-        if action not in {"create", "rename", "move", "deactivate"}:
+        if action not in {"create", "rename", "move", "deactivate", "reactivate"}:
             raise CategoryManagementError("Неизвестное действие.")
         if action in {"create", "rename"}:
             params["name"] = validate_name(params.get("name", ""))
@@ -114,13 +114,18 @@ class CategoryManager:
         entity_id = params.get("entity_id", "")
         entity = next((item for item in (*registry.categories, *registry.subcategories)
                        if getattr(item, "category_id", getattr(item, "subcategory_id", "")) == entity_id), None)
-        if action in {"rename", "move", "deactivate"} and entity is None:
+        if action in {"rename", "move", "deactivate", "reactivate"} and entity is None:
             raise CategoryManagementError("Эта сущность больше не найдена. Откройте список заново.")
         try:
             change = prepare_change(source, spreadsheet_id=self.store.spreadsheet_id,
                                     expected_revision=meta.taxonomy_revision, request_id=request_id, **params)
         except (TaxonomyError, ValueError) as exc:
             messages = {
+                "Entity is already active.": "Эта сущность уже активна. Откройте список заново.",
+                "Reactivate the parent category first.": "Сначала восстановите родительскую категорию: вместе с ней вернутся все её текущие подкатегории.",
+                "Invalid archive column mapping.": "Повреждён реестр колонок Архива. Таблица не изменена; требуется проверка оператором.",
+                "Ambiguous archive column mapping.": "Неоднозначное соответствие ID и колонок Архива. Таблица не изменена.",
+                "Conflicting archive label mapping.": "Индекс подписей противоречит реестру колонок Архива. Таблица не изменена.",
                 "Ambiguous category name within a transaction type.": "Категория с таким названием уже существует для этого типа операции.",
                 "Ambiguous subcategory name within a category.": "В категории уже есть подкатегория с таким названием. Выберите другое имя.",
                 "Cannot add a subcategory to an inactive parent.": "Нельзя добавить подкатегорию в неактивную категорию.",
@@ -144,6 +149,12 @@ class CategoryManager:
                 text += "\nПодкатегории:\n" + "\n".join(params["subcategories"])
         elif action == "rename":
             text = f"Переименовать: {entity.name} → {params['name']}\nНазвание изменится также в истории и архивах."
+        elif action == "reactivate":
+            text = f"Восстановить: {entity.name}\nID и история сохранятся."
+            if hasattr(entity, "category_id"):
+                names = [child.name for child in registry.subcategories if child.current_category_id == entity.category_id]
+                text += f"\nВосстановятся все текущие подкатегории ({len(names)}):\n" + "\n".join(names)
+                text += "\nВключая ранее отдельно отключённые. Перенесённые в другие категории не затрагиваются."
         elif action == "move":
             text = (f"Перенести: {entity.name}\nИз: {registry.category(entity.current_category_id).name}"
                     f"\nВ: {registry.category(params['parent_id']).name}\nТолько для новых операций; прежние останутся в старой категории.")
@@ -169,7 +180,30 @@ class CategoryManager:
 
     def status(self, request_id: str) -> CategoryPreview:
         _, saved = self._load(request_id)
-        return CategoryPreview(request_id, saved.get("text", "Изменение справочника"), saved["status"])
+        text = saved.get("text", "Изменение справочника")
+        display_status = saved["status"]
+        native = self._directory(request_id) / (request_id + "-native.json")
+        if native.exists():
+            try:
+                state = json.loads(native.read_text())
+                from finance_bot.category_changes_native import diagnostic
+                if state.get("version") == 2 and state.get("finished") and saved["status"] in {"applying", "rolling_back"}:
+                    expected = state.get("rollback_revision") if state.get("phase") == "rolled_back" else saved["change"]["expected_revision"] + 1
+                    meta = WorkbookMetadata.from_rows(self.store._rows(METADATA_SHEET))
+                    meta.require_ready(self.store.spreadsheet_id, expected_revision=expected)
+                    saved["status"] = "rolled_back" if state.get("phase") == "rolled_back" else "complete"
+                    _private_json(self._directory(request_id) / "request.json", saved)
+                    display_status = saved["status"]
+                if state.get("last_error"):
+                    text += "\n\n" + diagnostic(state["last_error"], request_id)
+                    if state["last_error"].get("code") in {"conflict", "financial_conflict", "period_conflict", "native_view_conflict", "missing_sheet", "new_dependency"} and saved["status"] == "applying":
+                        display_status = "conflict"
+                if state.get("version") != 2 and not state.get("finished") and saved["status"] in {"applying", "rolling_back"}:
+                    text += "\nСтарый журнал: продолжение и откат требуют восстановления оператором."
+                    display_status = "operator_required"
+            except (ValueError, OSError):
+                raise CategoryManagementError("Журнал повреждён. Нужно восстановление оператором.")
+        return CategoryPreview(request_id, text, display_status)
 
     def cancel(self, request_id: str) -> None:
         path, saved = self._load(request_id)
@@ -177,12 +211,7 @@ class CategoryManager:
             saved["status"] = "cancelled"
             _private_json(path, saved)
 
-    def apply(self, request_id: str, *, resume: bool = False) -> CategoryPreview:
-        path, saved = self._load(request_id)
-        if saved["status"] == "complete":
-            return CategoryPreview(request_id, saved["text"], "complete")
-        if saved["status"] not in ({"applying"} if resume else {"preview"}):
-            raise CategoryManagementError("Этот запрос уже не активен. Откройте «Категории» заново.")
+    def _plan(self, request_id, saved):
         try:
             fields = saved["change"]
             source = payload_snapshot(saved["source"])
@@ -195,6 +224,15 @@ class CategoryManager:
                 raise ValueError
         except (KeyError, TypeError, ValueError) as exc:
             raise CategoryManagementError("Сохранённый план повреждён. Нужно восстановление оператором.") from exc
+        return source, change
+
+    def apply(self, request_id: str, *, resume: bool = False) -> CategoryPreview:
+        path, saved = self._load(request_id)
+        if saved["status"] == "complete":
+            return CategoryPreview(request_id, saved["text"], "complete")
+        if saved["status"] not in ({"applying"} if resume else {"preview"}):
+            raise CategoryManagementError("Этот запрос уже не активен. Откройте «Категории» заново.")
+        source, change = self._plan(request_id, saved)
         if not resume:
             current = read_google_spreadsheet(self.store._get_spreadsheet())
             if fingerprint(current) != change.source_digest:
@@ -209,6 +247,7 @@ class CategoryManager:
                 saved["status"] = "stale"
                 _private_json(path, saved)
             raise CategoryManagementError(str(exc)) from exc
+        saved.pop("rollback_confirmation", None)
         saved["status"] = "applying"; _private_json(path, saved)
         try:
             self.store.apply_category_change(source, change, path.parent, confirmed=True, maintenance_confirmed=True)
@@ -217,7 +256,16 @@ class CategoryManager:
             if not native.exists():
                 saved["status"] = "stale"; _private_json(path, saved)
                 raise StaleCategoryPlan("Изменение не начато. Откройте новый предпросмотр.") from exc
-            raise CategoryManagementError("Изменение не завершено. Откройте «Категории» и продолжите сохранённый запрос.") from exc
+            try:
+                state = json.loads(native.read_text())
+                from finance_bot.category_changes_native import diagnostic, safe_failure
+                details = diagnostic(state.get("last_error") or safe_failure(exc, "apply"), request_id)
+            except (ValueError, OSError):
+                details = "Журнал недоступен; требуется оператор."
+            saved["last_error"] = details
+            _private_json(path, saved)
+            raise CategoryManagementError("Изменение не завершено. " + details +
+                " Откройте «Категории»: продолжение или проверяемый откат. Не повторяйте конфликтующий шаг.") from exc
         saved["status"] = "complete"; _private_json(path, saved)
         return CategoryPreview(request_id, saved["text"], "complete")
 
@@ -233,6 +281,74 @@ class CategoryManager:
         if self.root.exists():
             for path in sorted(self.root.glob("*/request.json")):
                 saved = self.status(path.parent.name)
-                if saved.status == "applying":
+                if saved.status in {"applying", "rolling_back", "conflict", "operator_required"}:
                     return saved
         return None
+
+    def preview_rollback(self, request_id: str) -> CategoryPreview:
+        path, saved = self._load(request_id)
+        if saved["status"] not in {"applying", "rolling_back"}:
+            raise CategoryManagementError("Этот запрос уже завершён или не был начат. Откат недоступен.")
+        source, change = self._plan(request_id, saved)
+        from finance_bot.category_changes_native import prepare_rollback, diagnostic, safe_failure
+        try:
+            prepare_rollback(source, change, self.store._get_spreadsheet(), path.parent)
+        except Exception as exc:
+            raise CategoryManagementError("Откат не начат. " + diagnostic(safe_failure(exc, "rollback_preflight"), request_id) +
+                                          " При конфликте требуется восстановление оператором.") from exc
+        saved["rollback_confirmation"] = True
+        _private_json(path, saved)
+        return CategoryPreview(request_id,
+            "Откатить незавершённое изменение? Вернутся исходные имена, активность и связи этого запроса. "
+            "Нетронутые ручные правки, финансовые суммы и даты сохранятся. Подтвердить откат?", "rollback_preview")
+
+    def rollback(self, request_id: str, *, confirmed=False, resume=False) -> CategoryPreview:
+        path, saved = self._load(request_id)
+        if saved["status"] == "rolled_back":
+            return CategoryPreview(request_id, "Изменение отменено, исходные настройки восстановлены.", "rolled_back")
+        if confirmed is not True or saved["status"] not in {"applying", "rolling_back"}:
+            raise CategoryManagementError("Требуется отдельное подтверждение отката.")
+        if not saved.get("rollback_confirmation") and not (resume and saved["status"] == "rolling_back"):
+            raise CategoryManagementError("Откройте предпросмотр отката и подтвердите его.")
+        source, change = self._plan(request_id, saved)
+        saved["status"] = "rolling_back"
+        _private_json(path, saved)
+        from finance_bot.category_changes_native import rollback_change_to_google_copy, diagnostic, safe_failure
+        try:
+            rollback_change_to_google_copy(source, change, self.store._get_spreadsheet(), path.parent, confirmed=True)
+        except Exception as exc:
+            native = path.parent / (request_id + "-native.json")
+            try:
+                state = json.loads(native.read_text())
+                if state.get("phase") not in {"rolling_back", "rollback_finalizing"}:
+                    saved["status"] = "applying"
+            except (ValueError, OSError):
+                state = {}
+            from finance_bot.category_journal import CategoryConflict
+            details = diagnostic(safe_failure(exc, "rollback_preflight") if isinstance(exc, CategoryConflict)
+                                 else state.get("last_error") or safe_failure(exc, "rollback_preflight"), request_id)
+            saved["last_error"] = details; _private_json(path, saved)
+            raise CategoryManagementError("Откат не завершён. " + details + " Откройте «Категории» для проверки статуса.") from exc
+        saved["status"] = "rolled_back";saved.pop("rollback_confirmation", None)
+        _private_json(path, saved)
+        return CategoryPreview(request_id, "Изменение отменено, исходные настройки восстановлены.", "rolled_back")
+
+    def recovery_ready(self) -> bool:
+        pending = self.pending()
+        if pending is None:return False
+        path, saved = self._load(pending.request_id)
+        source, change = self._plan(pending.request_id, saved)
+        native = path.parent / (pending.request_id + "-native.json")
+        if not native.exists():
+            current = read_google_spreadsheet(self.store._get_spreadsheet())
+            if fingerprint(current) == change.source_digest:return True
+            raise CategoryManagementError("Журнал pending отсутствует; требуется оператор.")
+        state = json.loads(native.read_text())
+        from finance_bot.category_changes_native import _signature, _require_owner
+        if (state.get("version") != 2 or state.get("request_id") != change.request_id
+                or state.get("spreadsheet_id") != change.spreadsheet_id or state.get("plan_signature") != _signature(state)
+                or state.get("source_digest") != change.source_digest or state.get("target_digest") != change.target_digest):
+            raise CategoryManagementError("Старый или повреждённый pending-журнал: требуется оператор перед выпуском.")
+        meta = WorkbookMetadata.from_rows(self.store._rows(METADATA_SHEET))
+        _require_owner(meta, change, allow_ready=True, rollback_revision=state.get("rollback_revision"))
+        return True

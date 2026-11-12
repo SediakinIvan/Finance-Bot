@@ -57,3 +57,12 @@ class DropdownTests(unittest.TestCase):
         self.assertTrue(all('setDataValidation' in r for r in requests[1:]))
         target.values_batch_update.assert_not_called()
         self.assertEqual(output.sheets['Траты'].cells[2,4],100)
+
+    def test_category_case_and_spaces_use_the_same_resolution_as_ledger(self):
+        parent=Category(new_id(),'Расход','Еда офис')
+        child=Subcategory(new_id(),parent.category_id,'Столовая')
+        taxonomy=Taxonomy('copy',1,(parent,),(child,))
+        rows=[list(TRANSACTION_HEADERS),['',' еда  офис ','','','','']]
+        requests=dropdown_requests(1,3,rows,taxonomy)
+        rules=[r['setDataValidation'] for r in requests if r['setDataValidation']['range']['startColumnIndex']==2]
+        self.assertEqual(rules[0]['rule']['condition']['values'],[{'userEnteredValue':'Столовая'}])

@@ -66,7 +66,7 @@ class DashboardPresentationTests(unittest.TestCase):
     def test_missing_or_tampered_plan_refuses_before_any_native_write(self):
         from finance_bot.category_changes_native import apply_change_to_google_copy
         for change in (self.change,replace(attach(self.change,self.source,self.target),presentation_digest='bad')):
-            with tempfile.TemporaryDirectory() as directory, patch('finance_bot.category_changes_native.read_google_spreadsheet',return_value=self.source),patch('finance_bot.category_changes_native._write_sheet') as write:
+            with tempfile.TemporaryDirectory() as directory, patch('finance_bot.category_changes_native.read_google_spreadsheet',return_value=self.source),patch.object(self.target,'values_batch_update',create=True) as write:
                 with self.assertRaises(MigrationError):apply_change_to_google_copy(self.source,change,self.target,Path(directory),confirmed=True,maintenance_confirmed=True)
                 write.assert_not_called();self.assertEqual(list(Path(directory).iterdir()),[])
     def test_bad_native_readback_keeps_failure_visible(self):

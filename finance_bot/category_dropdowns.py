@@ -1,5 +1,6 @@
 """Generate dependent native validation without changing ledger values."""
 from finance_bot.category_projections import sheet_rows
+from finance_bot.taxonomy import normalized_name
 from finance_bot.category_schema import REGISTRY_HEADERS, METADATA_SHEET, WorkbookMetadata, parse_registry
 
 
@@ -16,7 +17,7 @@ def dropdown_requests(sheet_id, max_rows, rows, taxonomy):
             else:
                 values = [child.name for child in taxonomy.subcategories
                           if child.active and taxonomy.category(child.current_category_id).active
-                          and taxonomy.category(child.current_category_id).name == get(1)]
+                          and normalized_name(taxonomy.category(child.current_category_id).name) == normalized_name(get(1))]
             if get(6) and get(7) and get(column):
                 values.append(get(column))
             values = tuple(dict.fromkeys(values))

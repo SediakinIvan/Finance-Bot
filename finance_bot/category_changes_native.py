@@ -1,131 +1,289 @@
-"""Apply a prepared category change with a durable maintenance journal."""
-
-from __future__ import annotations
-
+"""Durable field-level category application and confirmed compensating rollback."""
 from copy import deepcopy
+from dataclasses import replace
 import json
-from pathlib import Path
+import time
 
-from finance_bot.category_changes import CategoryChange
 from finance_bot.category_migration import cell_address, read_google_spreadsheet
-from finance_bot.category_projections import DETAIL_SHEET, sheet_rows, table_sheet
+from finance_bot.category_projections import sheet_rows
 from finance_bot.category_schema import AccessMode, METADATA_SHEET, WorkbookMetadata
-from finance_bot.migration_apply import MigrationError, _private_json, fingerprint, payload_snapshot, snapshot_payload
-from finance_bot.native_migration import _quote, _write_sheet, native_formula
+from finance_bot.migration_apply import MigrationError, _private_json, fingerprint
+from finance_bot.native_migration import _quote
+from finance_bot.dashboard_changes import digest, validate_presentation
+from finance_bot.category_journal import (
+    JOURNAL_VERSION, CategoryConflict, cell_steps, cell_state, check_edits,
+    financial_invariants, require_business, rollback_projection,
+)
+from finance_bot.category_native_views import (
+    validation_steps, presentation_step, view_state, view_expected,
+)
 
 
-def apply_change_to_google_copy(
-    source, change: CategoryChange, target, directory: Path, *,
-    confirmed: bool, maintenance_confirmed: bool,
-) -> None:
-    if confirmed is not True or maintenance_confirmed is not True or target.id != change.spreadsheet_id:
-        raise MigrationError("Confirm the exact category plan and suspend manual writes.")
-    if fingerprint(source) != change.source_digest or fingerprint(change.output) != change.target_digest:
-        raise MigrationError("Category source or plan was modified.")
-    from finance_bot.dashboard_changes import validate_presentation, apply_presentation
-    path = directory / (change.request_id + "-native.json")
-    current = read_google_spreadsheet(target)
+def _transient(error):
+    # Only exception types/status codes; never inspect bodies or cell values.
+    from requests.exceptions import Timeout, ConnectionError
+    seen=set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        status=getattr(getattr(error,'response',None),'status_code',None)
+        if status is not None:return status in {408,429,500,502,503,504}
+        if isinstance(error,(Timeout,ConnectionError)):return True
+        error=error.__cause__ or error.__context__
+    return False
+
+
+def safe_failure(error, stage, attempts=0):
+    if isinstance(error, CategoryConflict):
+        return {'stage':error.stage,'code':error.code,'sheet':error.sheet,
+                'cell':cell_address(*error.key) if error.key else '', 'attempts':attempts}
+    status=getattr(getattr(error,'response',None),'status_code',None)
+    code='temporary_google' if _transient(error) else ('google_access' if status in {401,403,404} else 'operation_failed')
+    return {'stage':stage,'code':code,'sheet':'','cell':'','attempts':attempts}
+
+
+def diagnostic(error, request_id=""):
+    prefix = f"Запрос: {request_id}. " if request_id else ""
+    return prefix + (f"Этап: {error.get('stage','unknown')}. Код: {error.get('code','operation_failed')}. "
+            f"Область: {error.get('sheet','')}!{error.get('cell','')}. Попыток: {error.get('attempts',0)}.")
+
+
+def _signature(state):
+    def clean(step):return {k:v for k,v in step.items() if k not in {'phase','attempts'}}
+    return digest({'request_id':state['request_id'],'spreadsheet_id':state['spreadsheet_id'],
+                   'steps':[clean(s) for s in state['steps']], 'pending':clean(state['pending'])})
+
+
+def _read_edits(target, step):
+    edits=step['edits'];name=step['sheet']
+    if callable(getattr(type(target),'values_batch_get',None)):
+        lo_r=min(e['key'][0] for e in edits);hi_r=max(e['key'][0] for e in edits)
+        lo_c=min(e['key'][1] for e in edits);hi_c=max(e['key'][1] for e in edits)
+        area=_quote(name)+cell_address(lo_r,lo_c)+':'+cell_address(hi_r,hi_c)
+        values=target.values_batch_get([area],params={'valueRenderOption':'FORMULA'})['valueRanges'][0].get('values',[])
+        result=[]
+        for edit in edits:
+            r,c=edit['key'][0]-lo_r,edit['key'][1]-lo_c
+            value=values[r][c] if r<len(values) and c<len(values[r]) else ''
+            result.append({'formula':value} if isinstance(value,str) and value.startswith('=') else {'value':value})
+        return result
+    book=read_google_spreadsheet(target)
+    if name not in book.sheets:raise CategoryConflict('readback',name,code='missing_sheet')
+    return [cell_state(book.sheets[name],tuple(edit['key']),target) for edit in edits]
+
+
+def _run_step(target, step, state, path, *, inverse=False):
+    side,other=('before','after') if inverse else ('after','before')
+    stage=('rollback:' if inverse else 'apply:')+step['id']
+    state['stage']=stage
+    # Three attempts per invocation, each preceded by a fresh readback. Attempts
+    # persisted across invocations are diagnostic, not an infinite auto-retry.
+    for attempt in range(3):
+        step['attempts']=step.get('attempts',0)+1
+        try:
+            if step['kind']=='cells':
+                actual=_read_edits(target,step);pending=[]
+                for edit,observed in zip(step['edits'],actual):
+                    if observed==edit[side]:continue
+                    if observed!=edit[other]:raise CategoryConflict(stage,step['sheet'],tuple(edit['key']))
+                    pending.append(edit)
+                if not pending:
+                    step['phase']='reverted' if inverse else 'verified';_private_json(path,state);return
+            else:
+                actual=view_state(target,step)
+                if actual==view_expected(step,side):
+                    step['phase']='reverted' if inverse else 'verified';_private_json(path,state);return
+                if actual!=view_expected(step,other):raise CategoryConflict(stage,code='native_view_conflict')
+            step['phase']='reverting' if inverse else 'writing'
+            _private_json(path,state)  # Must succeed before remote mutation.
+            if step['kind']=='cells':
+                for option in ('RAW','USER_ENTERED'):
+                    data=[]
+                    for edit in pending:
+                        value=edit[side]
+                        if ('formula' in value)!=(option=='USER_ENTERED'):continue
+                        data.append({'range':_quote(step['sheet'])+cell_address(*edit['key']),
+                                     'values':[[value.get('formula',value.get('value',''))]]})
+                    if data:target.values_batch_update({'valueInputOption':option,'data':data})
+            else:
+                requests=step['inverse' if inverse else 'forward']
+                if requests:target.batch_update({'requests':requests})
+            # A successful transport response alone is not a verified result.
+            if step['kind']=='cells':
+                observed=_read_edits(target,step)
+                for edit,value in zip(step['edits'],observed):
+                    if value!=edit[side]:raise CategoryConflict(stage,step['sheet'],tuple(edit['key']),'readback_mismatch')
+            elif view_state(target,step)!=view_expected(step,side):
+                raise CategoryConflict(stage,code='native_readback_mismatch')
+            step['phase']='reverted' if inverse else 'verified';_private_json(path,state);return
+        except Exception as error:
+            state['last_error']=safe_failure(error,stage,step.get('attempts',0));_private_json(path,state)
+            if not _transient(error) or attempt==2:raise
+            time.sleep(.25*(2**attempt))
+
+
+def _meta_step(source, after, name):
+    edits=[]
+    original=source.sheets[METADATA_SHEET]
+    values={'access_mode':after.access_mode.value,'pending_request_id':after.pending_request_id,
+            'taxonomy_revision':after.taxonomy_revision}
+    for index,row in enumerate(sheet_rows(original),1):
+        if row[0] in values:
+            edits.append({'key':[index,2],'before':{'value':row[1]},'after':{'value':values[row[0]]}})
+    return {'id':name,'kind':'cells','sheet':METADATA_SHEET,'edits':edits,'phase':'prepared'}
+
+
+def _meta_from(book):return WorkbookMetadata.from_rows(sheet_rows(book.sheets[METADATA_SHEET]))
+
+
+def _validate_identity(source,change,target):
+    if target.id!=change.spreadsheet_id or fingerprint(source)!=change.source_digest or fingerprint(change.output)!=change.target_digest:
+        raise CategoryConflict('plan',code='plan_modified')
+
+
+def _load_or_create(source,change,target,directory):
+    path=directory/(change.request_id+'-native.json')
     if path.exists():
-        state = json.loads(path.read_text())
-        if (state["target_digest"] != change.target_digest or state["source_digest"] != change.source_digest
-                or state.get("presentation_digest") != change.presentation_digest):
-            raise MigrationError("Request ID already belongs to another plan.")
-        if state["finished"]:
-            meta = WorkbookMetadata.from_rows(sheet_rows(current.sheets[METADATA_SHEET]))
-            meta.require_ready(target.id, expected_revision=change.expected_revision + 1)
-            return
-    else:
-        validate_presentation(target, change.presentation, change.presentation_digest)
-        if fingerprint(current) != change.source_digest:
-            raise MigrationError("Workbook changed since category preview.")
-        meta = WorkbookMetadata.from_rows(sheet_rows(current.sheets[METADATA_SHEET]))
-        meta.require_ready(target.id, expected_revision=change.expected_revision)
-        state = {"source_digest": change.source_digest, "target_digest": change.target_digest,
-                 "presentation_digest": change.presentation_digest,
-                 "completed": [], "finished": False, "source": snapshot_payload(source)}
-        _private_json(path, state)
-    validate_presentation(target, change.presentation, change.presentation_digest, resume=True)
-    from dataclasses import replace
-    meta = WorkbookMetadata.from_rows(sheet_rows(source.sheets[METADATA_SHEET]))
-    pending = replace(meta, access_mode=AccessMode.MAINTENANCE, pending_request_id=change.request_id)
-    if "pending" not in state["completed"]:
-        _write_sheet(target, table_sheet(METADATA_SHEET, pending.to_rows()))
-        state["completed"].append("pending")
-        _private_json(path, state)
-    for name, expected in change.output.sheets.items():
-        if name == METADATA_SHEET or name in state["completed"]:
-            continue
-        if source.sheets.get(name) == expected:
-            # No remote mutation requires no per-sheet read/write cycle. The
-            # complete final readback below still verifies untouched sheets.
-            state["completed"].append(name)
-            _private_json(path, state)
-            continue
-        observed = read_google_spreadsheet(target)
-        live_meta = WorkbookMetadata.from_rows(sheet_rows(observed.sheets[METADATA_SHEET]))
-        if live_meta.pending_request_id != change.request_id or live_meta.taxonomy_revision != change.expected_revision:
-            raise MigrationError("Pending category operation changed externally.")
-        # Financial values must stay unchanged through every rename/move step.
-        for title, original in source.sheets.items():
-            if title != "Траты" and title != "Архив" and not title.startswith("Архив ("):
-                continue
-            actual = observed.sheets.get(title)
-            if actual is None:
-                raise MigrationError("An original financial sheet disappeared.")
-            for key, value in original.cells.items():
-                # Names are allowed to change; financial values and dates are not.
-                if title == "Траты" and key[0] > 1 and key[1] not in {2, 3}:
-                    if actual.cells.get(key, "") != value:
-                        raise MigrationError("A financial operation changed during maintenance.")
-                elif title != "Траты" and isinstance(value, (int, float)):
-                    if actual.cells.get(key, "") != value:
-                        raise MigrationError("An archive amount changed during maintenance.")
-        if name == "Аналитика":
-            original = source.sheets[name]
-            raw, formulas = [], []
-            for key in sorted(set(original.cells) | set(expected.cells) | set(original.formulas) | set(expected.formulas)):
-                if key in expected.formulas:
-                    if original.formulas.get(key) != expected.formulas[key]:
-                        formulas.append({"range": _quote(name) + cell_address(*key),
-                                         "values": [[native_formula(expected.formulas[key], target)]]})
-                elif original.cells.get(key, "") != expected.cells.get(key, "") or key in original.formulas:
-                    raw.append({"range": _quote(name) + cell_address(*key), "values": [[expected.cells.get(key, "")]]})
-            for option, changes in (("RAW", raw), ("USER_ENTERED", formulas)):
-                if changes:
-                    target.values_batch_update({"valueInputOption": option, "data": changes})
-        elif name.startswith("_financebot_") or name == "Категории":
-            _write_sheet(target, expected)
-        else:
-            original = source.sheets.get(name)
-            changes = []
-            for key, value in expected.cells.items():
-                if original is None or original.cells.get(key, "") != value:
-                    # Only changed labels: never clear/rewrite the whole archive.
-                    changes.append({"range": _quote(name) + cell_address(*key), "values": [[value]]})
-            if changes:
-                target.values_batch_update({"valueInputOption": "RAW", "data": changes})
-        state["completed"].append(name)
-        _private_json(path, state)
-    apply_presentation(target, change.presentation, change.presentation_digest)
-    from finance_bot.category_dropdowns import apply_category_dropdowns
-    apply_category_dropdowns(target, change.output)
-    # Check every cell this plan changes. Formula values require native Sheets
-    # recalculation, but formula texts and all identity/label fields are exact.
-    actual = read_google_spreadsheet(target)
-    for name, expected in change.output.sheets.items():
-        if name == METADATA_SHEET:
-            continue
-        observed = actual.sheets[name]
-        for key, value in expected.cells.items():
-            if key in expected.formulas:
-                continue
-            if observed.cells.get(key, "") != value:
-                raise MigrationError("Category projection readback failed.")
-        if {key: native_formula(value, target) for key, value in expected.formulas.items()} != observed.formulas:
-            raise MigrationError("Category formula projection readback failed.")
-        if any(value not in ("", None) and key not in expected.cells and key not in expected.formulas
-               for key, value in observed.cells.items()):
-            raise MigrationError("Unexpected values appeared during category maintenance.")
-    _write_sheet(target, change.output.sheets[METADATA_SHEET])
-    state["finished"] = True
-    _private_json(path, state)
+        state=json.loads(path.read_text())
+        if state.get('source_digest')!=change.source_digest or state.get('target_digest')!=change.target_digest:
+            raise CategoryConflict('journal',code='plan_modified')
+        if state.get('version')!=JOURNAL_VERSION:
+            if state.get('finished'):
+                meta=_meta_from(read_google_spreadsheet(target));meta.require_ready(target.id,expected_revision=change.expected_revision+1)
+                return path,state
+            raise CategoryConflict('journal',code='legacy_pending_requires_operator')
+        if (state.get('request_id')!=change.request_id or state.get('spreadsheet_id')!=target.id
+                or state.get('plan_signature')!=_signature(state) or state.get('presentation_digest')!=change.presentation_digest):
+            raise CategoryConflict('journal',code='plan_modified')
+        return path,state
+    current=read_google_spreadsheet(target)
+    if fingerprint(current)!=change.source_digest:raise CategoryConflict('preview',code='stale_source')
+    meta=_meta_from(current);meta.require_ready(target.id,expected_revision=change.expected_revision)
+    validate_presentation(target,change.presentation,change.presentation_digest)
+    pending=replace(meta,access_mode=AccessMode.MAINTENANCE,pending_request_id=change.request_id)
+    steps=cell_steps(source,change.output,target)
+    steps += [presentation_step(target,change.presentation),validation_steps(target,change.output)]
+    state={'version':JOURNAL_VERSION,'request_id':change.request_id,'spreadsheet_id':target.id,'source_digest':change.source_digest,'target_digest':change.target_digest,
+           'presentation_digest':change.presentation_digest,'phase':'applying','finished':False,
+           'steps':steps,'pending':_meta_step(source,pending,'maintenance'),'last_error':None}
+    state['plan_signature']=_signature(state)
+    _private_json(path,state)
+    return path,state
+
+
+def _require_owner(meta,change,*,allow_ready=False,rollback_revision=None):
+    if meta.spreadsheet_id!=change.spreadsheet_id:raise CategoryConflict('metadata',code='scope')
+    pending=meta.pending_request_id==change.request_id and meta.access_mode==AccessMode.MAINTENANCE and meta.taxonomy_revision in {change.expected_revision,change.expected_revision+1}
+    initial=not meta.pending_request_id and meta.access_mode==AccessMode.OPEN and meta.taxonomy_revision==change.expected_revision
+    final=allow_ready and not meta.pending_request_id and meta.access_mode==AccessMode.OPEN and meta.taxonomy_revision in {change.expected_revision+1,rollback_revision}
+    if not (pending or initial or final):raise CategoryConflict('metadata',code='request_changed')
+
+
+def apply_change_to_google_copy(source, change, target, directory, *, confirmed, maintenance_confirmed):
+    if confirmed is not True or maintenance_confirmed is not True:raise MigrationError('Confirm the exact category plan and suspend manual writes.')
+    _validate_identity(source,change,target)
+    path,state=_load_or_create(source,change,target,directory)
+    if state.get('finished'):
+        if state.get('phase')=='rolled_back':raise CategoryConflict('apply',code='already_rolled_back')
+        _meta_from(read_google_spreadsheet(target)).require_ready(target.id,expected_revision=change.expected_revision+1)
+        return
+    if state['phase'].startswith('rollback') or state['phase']=='rolling_back':raise CategoryConflict('apply',code='rollback_in_progress')
+    try:
+        current=read_google_spreadsheet(target);meta=_meta_from(current)
+        _require_owner(meta,change,allow_ready=state['phase']=='finalizing')
+        financial_invariants(source,current)
+        check_edits(current,state['steps'],target,'preflight')
+        validate_presentation(target,change.presentation,change.presentation_digest,resume=True)
+        if state['phase']!='finalizing':_run_step(target,state['pending'],state,path)
+        for step in state['steps']:_run_step(target,step,state,path)
+        state['stage']='verify';_private_json(path,state)
+        final=read_google_spreadsheet(target)
+        financial_invariants(source,final);require_business(final,target.id)
+        check_edits(final,state['steps'],target,'verify')
+        # Every written field must be the target, not merely before-or-after.
+        for step in state['steps']:
+            if step['kind']=='cells':
+                for edit in step['edits']:
+                    if cell_state(final.sheets[step['sheet']],tuple(edit['key']),target)!=edit['after']:
+                        raise CategoryConflict('verify',step['sheet'],tuple(edit['key']))
+        pending=_meta_from(source)
+        state['phase']='finalizing'
+        if 'publish' not in state:
+            # Final meta before-image is maintenance, not the original open state.
+            publish=_meta_step(source,replace(pending,taxonomy_revision=change.expected_revision+1),'publish')
+            for edit,p in zip(publish['edits'],state['pending']['edits']):edit['before']=p['after']
+            state['publish']=publish
+        _private_json(path,state);_run_step(target,state['publish'],state,path)
+        _meta_from(read_google_spreadsheet(target)).require_ready(target.id,expected_revision=change.expected_revision+1)
+        state.update(phase='complete',finished=True,last_error=None);_private_json(path,state)
+    except Exception as error:
+        state['last_error']=safe_failure(error,state.get('stage','preflight'),(state.get('last_error') or {}).get('attempts',0))
+        _private_json(path,state);raise
+
+
+def prepare_rollback(source,change,target,directory):
+    _validate_identity(source,change,target)
+    path=directory/(change.request_id+'-native.json')
+    if not path.exists():raise CategoryConflict('rollback',code='journal_missing')
+    state=json.loads(path.read_text())
+    if (state.get('version')!=JOURNAL_VERSION or state.get('request_id')!=change.request_id
+            or state.get('spreadsheet_id')!=target.id or state.get('plan_signature')!=_signature(state)):
+        raise CategoryConflict('rollback',code='legacy_pending_requires_operator')
+    if state.get('source_digest')!=change.source_digest or state.get('target_digest')!=change.target_digest:
+        raise CategoryConflict('rollback',code='plan_modified')
+    if state.get('finished'):
+        if state.get('phase')=='rolled_back':return path,state,None
+        raise CategoryConflict('rollback',code='already_complete')
+    current=read_google_spreadsheet(target)
+    _require_owner(_meta_from(current),change,allow_ready=True,rollback_revision=state.get('rollback_revision'))
+    projected=rollback_projection(source,change.output,current,state['steps'],target)
+    for step in state['steps']:
+        if step['kind']!='cells' and view_state(target,step) not in (view_expected(step,'before'),view_expected(step,'after')):
+            if (step['kind']=='validations' and step.get('phase')=='reverted' and state.get('rollback_dropdowns')
+                    and view_state(target,step) in (view_expected(state['rollback_dropdowns'],'before'),view_expected(state['rollback_dropdowns'],'after'))):continue
+            raise CategoryConflict('rollback_preflight',code='native_view_conflict')
+    return path,state,projected
+
+
+def rollback_change_to_google_copy(source,change,target,directory,*,confirmed):
+    if confirmed is not True:raise MigrationError('Confirm rollback explicitly.')
+    path,state,projected=prepare_rollback(source,change,target,directory)
+    if state.get('phase')=='rolled_back':return
+    try:
+        if 'rollback_revision' not in state:
+            state['rollback_revision']=change.expected_revision+2
+            state['rollback_dropdowns']=validation_steps(target,projected)
+        finalizing = state['phase']=='rollback_finalizing'
+        meta_book=read_google_spreadsheet(target);meta=_meta_from(meta_book)
+        if 'rollback_maintenance' not in state:
+            state['rollback_maintenance']=_meta_step(meta_book,replace(meta,access_mode=AccessMode.MAINTENANCE,pending_request_id=change.request_id),'rollback_maintenance')
+        state['phase']='rollback_finalizing' if finalizing else 'rolling_back'
+        state['stage']='rollback_preflight';_private_json(path,state)
+        if not finalizing:_run_step(target,state['rollback_maintenance'],state,path)
+        for step in reversed(state['steps']):
+            if step['kind']=='validations' and step.get('phase')=='reverted' and state.get('rollback_dropdowns',{}).get('phase')!='prepared':continue
+            _run_step(target,step,state,path,inverse=True)
+        # Coherent lists for retained manual input, rather than restoring stale
+        # validation rules from an old row snapshot.
+        state['rollback_dropdowns']=state.get('rollback_dropdowns') or validation_steps(target,projected)
+        # Original validation may have been restored above; regenerate the plan
+        # for this final step only before its first write, then persist it.
+        if state['rollback_dropdowns']['phase']=='prepared':
+            state['rollback_dropdowns']=validation_steps(target,projected);_private_json(path,state)
+        _run_step(target,state['rollback_dropdowns'],state,path)
+        current=read_google_spreadsheet(target);require_business(current,target.id)
+        for step in state['steps']:
+            if step['kind']=='cells':
+                for edit in step['edits']:
+                    if cell_state(current.sheets[step['sheet']],tuple(edit['key']),target)!=edit['before']:
+                        raise CategoryConflict('rollback_verify',step['sheet'],tuple(edit['key']))
+        if 'rollback_publish' not in state:
+            meta=replace(_meta_from(source),taxonomy_revision=state['rollback_revision'])
+            publish=_meta_step(source,meta,'rollback_publish')
+            for edit,p in zip(publish['edits'],state['rollback_maintenance']['edits']):edit['before']=p['after']
+            state['rollback_publish']=publish
+        state['phase']='rollback_finalizing';_private_json(path,state)
+        _run_step(target,state['rollback_publish'],state,path)
+        _meta_from(read_google_spreadsheet(target)).require_ready(target.id,expected_revision=state['rollback_revision'])
+        state.update(phase='rolled_back',finished=True,last_error=None);_private_json(path,state)
+    except Exception as error:
+        state['last_error']=safe_failure(error,state.get('stage','rollback'));_private_json(path,state);raise

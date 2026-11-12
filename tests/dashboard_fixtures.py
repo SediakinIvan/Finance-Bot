@@ -19,11 +19,42 @@ class DashboardTarget:
     def __init__(self):
         self.metadata = metadata()
         self.requests = []
-    def fetch_sheet_metadata(self, params=None):return deepcopy(self.metadata)
+        self.validation_rules = {}
+        self.formats = {}
+    def fetch_sheet_metadata(self, params=None):
+        params=params or {}
+        if 'userEnteredFormat' in params.get('fields',''):
+            from finance_bot.category_migration import _coordinate
+            area=params['ranges'].rsplit('!',1)[1];start,end=area.split(':');r,c=_coordinate(start);rr,cc=_coordinate(end)
+            return {'sheets':[{'properties':{'title':'Аналитика'},'data':[{'startRow':r-1,'startColumn':c-1,'rowData':[
+                {'values':[{'userEnteredFormat':deepcopy(self.formats.get((row,col),{}))} for col in range(c-1,cc)]} for row in range(r-1,rr)]}]}]}
+        if 'Траты' in str(params.get('ranges','')) or 'tables' in params.get('fields',''):
+            rows=[]
+            for row in range(1,100):
+                rows.append({'values':[{'dataValidation':self.validation_rules[row,col]} if (row,col) in self.validation_rules else {} for col in (1,2)]})
+            return {'sheets':[{'properties':{'title':'Траты','sheetId':43,'gridProperties':{'rowCount':100,'columnCount':26}},
+                               'data':[{'startRow':1,'startColumn':1,'rowData':rows}]}]}
+        return deepcopy(self.metadata)
     def batch_update(self, body):
         self.requests.extend(deepcopy(body['requests']))
         for request in body['requests']:
+            if 'copyPaste' in request:
+                copy=request['copyPaste'];src,dst=copy['source'],copy['destination']
+                for r in range(dst['startRowIndex'],dst['endRowIndex']):
+                    for c in range(dst['startColumnIndex'],dst['endColumnIndex']):
+                        self.formats[r,c]=deepcopy(self.formats.get((src['startRowIndex'],src['startColumnIndex']+c-dst['startColumnIndex']),{}))
+            if 'updateCells' in request:
+                entry=request['updateCells'];area=entry['range']
+                for r,row in enumerate(entry['rows']):
+                    for c,cell in enumerate(row['values']):self.formats[area['startRowIndex']+r,area['startColumnIndex']+c]=deepcopy(cell.get('userEnteredFormat',{}))
+            if 'setDataValidation' in request:
+                entry=request['setDataValidation'];area=entry['range']
+                for row in range(area['startRowIndex'],area['endRowIndex']):
+                    key=(row,area['startColumnIndex'])
+                    if 'rule' in entry:self.validation_rules[key]=deepcopy(entry['rule'])
+                    else:self.validation_rules.pop(key,None)
             if 'updateChartSpec' in request:
+
                 edit=request['updateChartSpec']
                 next(chart for chart in self.metadata['sheets'][0]['charts'] if chart['chartId']==edit['chartId'])['spec']=deepcopy(edit['spec'])
 

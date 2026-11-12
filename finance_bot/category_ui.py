@@ -37,6 +37,13 @@ async def _screen(update, context, text, buttons, state=MENU):
     token = flow["token"]
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=f"tax:{token}:{action}")
                                      for label, action in row] for row in buttons])
+    # A restored category can have more children than one Telegram message.
+    # Publish the complete preview before displaying its single confirmation.
+    while len(text) > 3500:
+        cut = text.rfind("\n", 0, 3500)
+        if cut < 1: cut = 3500
+        await update.effective_message.reply_text(text[:cut])
+        text = text[cut:].lstrip("\n")
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     else:
@@ -85,7 +92,7 @@ async def _category(update, context, category_id, page=0):
     if parent.active:
         buttons += [[("Добавить подкатегорию", "add")], [("Переименовать", "rename"), ("Удалить", "delete")]]
     else:
-        buttons += [[("Переименовать", "rename")]]
+        buttons += [[("Переименовать", "rename"), ("Восстановить", "reactivate")]]
     buttons += [[("Активные подкатегории" if inactive else "Неактивные подкатегории", "childfilter")], [("Назад", "root"), ("Закрыть", "cancel")]]
     flow.update(phase="browse", category_id=category_id, entity_id=category_id, entity_kind="category", child_page=page,
                 inactive_children=inactive)
@@ -103,6 +110,8 @@ async def _child(update, context, child_id):
         raise CategoryManagementError("Подкатегория перенесена. Откройте список заново.")
     flow.update(phase="browse", entity_id=child_id, entity_kind="subcategory")
     buttons = [[("Переименовать", "rename")]]
+    if not child.active:
+        buttons += [[("Восстановить", "reactivate")]]
     if child.active and parent.active:
         buttons += [[("Перенести", "move"), ("Удалить", "delete")]]
     buttons += [[("Назад", "parent"), ("Закрыть", "cancel")]]
@@ -138,7 +147,7 @@ async def _close(update, context):
         return await _screen(update, context, "Изменение применяется. Отмена не является откатом.", [], CONFIRM)
     if flow.get("request_status") == "preview":
         await asyncio.to_thread(_store(update, context).cancel_category_change, update.effective_user.id, flow["request_id"])
-    if flow.get("phase") == "recover" or flow.get("request_status") == "applying":
+    if flow.get("phase") == "recover" or flow.get("request_status") in {"applying", "rolling_back", "conflict"}:
         message = "Меню закрыто. Закрытие не откатывает начатое изменение. Проверьте статус через /categories."
     elif flow.get("phase") in {"type", "new_name", "new_children", "add_name", "rename", "target", "preview"}:
         message = "Изменение отменено. Таблица не изменена."
@@ -151,6 +160,15 @@ async def _close(update, context):
         await update.callback_query.edit_message_reply_markup(reply_markup=None)
     await update.effective_message.reply_text(message)
     return ConversationHandler.END
+
+
+def _recovery_buttons(status):
+    if status == "rolling_back":
+        return [[("Продолжить откат", "resume_rollback")], [("Закрыть", "cancel")]]
+    if status == "operator_required":
+        return [[("Закрыть", "cancel")]]
+    buttons = [] if status == "conflict" else [[("Продолжить", "resume")]]
+    return buttons + [[("Откатить изменение", "rollback")], [("Закрыть", "cancel")]]
 
 
 async def start_categories(update, context):
@@ -168,7 +186,7 @@ async def start_categories(update, context):
             flow = _flow(context)
             flow.update(phase="recover", request_id=pending.request_id, request_status=pending.status)
             return await _screen(update, context, "Незавершённое изменение. Продолжить тот же запрос?\n\n" + pending.text,
-                                 [[("Продолжить", "resume")], [("Закрыть", "cancel")]], CONFIRM)
+                                 _recovery_buttons(pending.status), CONFIRM)
         return await _root(update, context)
     except SheetsError as exc:
         context.user_data.pop(FLOW_KEY, None)
@@ -196,6 +214,31 @@ async def handle_category_callback(update, context):
             return await _close(update, context)
         if verb == "restart":
             return await start_categories(update, context)
+        if verb == "rollback":
+            if flow.get("phase") != "recover":
+                raise CategoryManagementError("Откройте статус незавершённого запроса заново.")
+            preview = await asyncio.to_thread(_store(update, context).preview_category_rollback,
+                                              update.effective_user.id, flow["request_id"])
+            flow["phase"] = "rollback_preview"
+            return await _screen(update, context, preview.text,
+                                 [[("Подтвердить откат", "confirm_rollback")], [("Не откатывать", "cancel")]], CONFIRM)
+        if verb in {"confirm_rollback", "resume_rollback"}:
+            expected = "rollback_preview" if verb == "confirm_rollback" else "recover"
+            if flow.get("phase") != expected or (verb == "resume_rollback" and flow.get("request_status") != "rolling_back"):
+                raise CategoryManagementError("Это подтверждение отката уже не активно.")
+            flow.update(applying=True, request_status="rolling_back", token=secrets.token_hex(4))
+            await query.edit_message_text("Откатываю изменение. Пока не редактируйте таблицу…")
+            try:
+                result = await asyncio.to_thread(_store(update, context).rollback_category_change,
+                    update.effective_user.id, flow["request_id"], confirmed=True, resume=verb == "resume_rollback")
+                if result.status != "rolled_back":
+                    raise CategoryManagementError("Откат ещё не завершён. Откройте /categories.")
+            finally:
+                flow["applying"] = False
+            flow.pop("request_id", None); flow.pop("request_status", None)
+            flow["phase"] = "complete"
+            return await _screen(update, context, "Изменение отменено, исходные настройки восстановлены.",
+                                 [[("К категориям", "root"), ("Закрыть", "cancel")]])
         if verb in {"confirm", "resume"}:
             if (verb == "confirm" and flow.get("phase") != "preview") or (verb == "resume" and flow.get("phase") != "recover"):
                 raise CategoryManagementError("Это подтверждение уже не активно.")
@@ -253,11 +296,23 @@ async def handle_category_callback(update, context):
             return await _targets(update, context)
         if verb == "target" and flow.get("phase") == "target":
             return await _preview(update, context, action="move", entity_id=flow["entity_id"], parent_id=value)
+        if verb == "reactivate":
+            return await _preview(update, context, action="reactivate", entity_id=flow["entity_id"])
         if verb == "delete":
             return await _preview(update, context, action="deactivate", entity_id=flow["entity_id"])
         raise CategoryManagementError("Кнопка не активна. Откройте /categories.")
     except (SheetsError, ValueError, KeyError) as exc:
         text = str(exc) if isinstance(exc, SheetsError) else "Список изменился. Откройте /categories заново."
+        if flow.get("request_status") in {"applying", "rolling_back", "conflict"}:
+            flow["phase"] = "recover"
+            # Reload the durable phase: a preflight rejection has not started rollback.
+            try:
+                pending = await asyncio.to_thread(_store(update, context).category_change_status, update.effective_user.id)
+                if pending is not None:
+                    flow["request_status"] = pending.status
+            except SheetsError:
+                pass
+            return await _screen(update, context, text, _recovery_buttons(flow["request_status"]), CONFIRM)
         return await _screen(update, context, text, [[("Открыть категории", "restart"), ("Закрыть", "cancel")]])
 
 
