@@ -138,11 +138,18 @@ async def _close(update, context):
         return await _screen(update, context, "Изменение применяется. Отмена не является откатом.", [], CONFIRM)
     if flow.get("request_status") == "preview":
         await asyncio.to_thread(_store(update, context).cancel_category_change, update.effective_user.id, flow["request_id"])
+    if flow.get("phase") == "recover" or flow.get("request_status") == "applying":
+        message = "Меню закрыто. Закрытие не откатывает начатое изменение. Проверьте статус через /categories."
+    elif flow.get("phase") in {"type", "new_name", "new_children", "add_name", "rename", "target", "preview"}:
+        message = "Изменение отменено. Таблица не изменена."
+    else:
+        message = "Управление категориями закрыто."
     context.user_data.pop(FLOW_KEY, None)
     if update.callback_query:
-        await update.callback_query.edit_message_text("Управление категориями закрыто.")
-    else:
-        await update.effective_message.reply_text("Управление категориями закрыто.")
+        # Keep the preview, error or success in the chat instead of replacing
+        # the only evidence of the outcome with a generic "closed" message.
+        await update.callback_query.edit_message_reply_markup(reply_markup=None)
+    await update.effective_message.reply_text(message)
     return ConversationHandler.END
 
 
@@ -193,6 +200,7 @@ async def handle_category_callback(update, context):
             if (verb == "confirm" and flow.get("phase") != "preview") or (verb == "resume" and flow.get("phase") != "recover"):
                 raise CategoryManagementError("Это подтверждение уже не активно.")
             flow["applying"] = True
+            flow["request_status"] = "applying"
             flow["token"] = secrets.token_hex(4)
             await query.edit_message_text("Применяю изменение. Пока не редактируйте таблицу…")
             try:
@@ -203,6 +211,7 @@ async def handle_category_callback(update, context):
             finally:
                 flow["applying"] = False
             flow.pop("request_id", None);flow.pop("request_status", None)
+            flow["phase"] = "complete"
             return await _screen(update, context, "Изменение выполнено.", [[("К категориям", "root"), ("Закрыть", "cancel")]])
         if verb == "root":
             return await _root(update, context, flow.get("root_page", 0))

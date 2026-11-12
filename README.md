@@ -1,6 +1,11 @@
+---
+owner: пользователь (владелец продукта и окружений)
+updated: 2026-11-12
+---
+
 # Telegram PnL entry bot
 
-A private Telegram bot for guided income/expense entry backed by Google Sheets. This development version requires schema v2: stable category IDs, dynamic analytics, and coordinated Apps Script installation. **Do not deploy it against the existing v1 workbook before migration.** The current deployed v1.5.1 release remains compatible with the old workbook.
+A private Telegram bot for guided income/expense entry backed by Google Sheets. This development version requires schema v2: stable category IDs, dynamic analytics, and coordinated Apps Script installation. **Do not deploy it against the existing v1 workbook before migration.** Production currently runs stable main (`v1.5.4`, same application tree as `v1.5.3`). Development runs on the isolated test bot from `feature/manage-categories` (`test-2026-11-12-2`). See [the environment and branch map](openspec/context/09-environments-and-branches.md) before choosing a workbook or deploying.
 
 See [migration and Apps Script installation](docs/category-migration.md) and [v2 schema](docs/category-schema-v2.md). Category management buttons are a later feature; this change provides their underlying services.
 

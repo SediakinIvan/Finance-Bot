@@ -91,3 +91,46 @@ class CategoryChangesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MissingArchiveCategoryChangeTests(unittest.TestCase):
+    setUp = CategoryChangesTests.setUp
+    plan = CategoryChangesTests.plan
+    def add_missing_archive_reference(self):
+        from finance_bot.category_projections import LABEL_HEADERS
+        rows=sheet_rows(self.book.sheets[LABEL_SHEET])
+        rows.append(['Архив (удалённый снимок)','A9','category',self.parent.category_id,''])
+        self.book.sheets[LABEL_SHEET]=table_sheet(LABEL_SHEET,rows)
+        return rows[-1]
+
+    def test_nonrename_actions_preserve_dangling_index_and_existing_archive(self):
+        missing=self.add_missing_archive_reference()
+        for action,params in (
+            ('create',dict(name='Одежда',subcategories=('Белье','Верхняя одежда','Одежда','Аксессуары'))),
+            ('create',dict(parent_id=self.parent.category_id,name='Добавленная')),
+            ('deactivate',dict(entity_id=self.child.subcategory_id)),
+            ('deactivate',dict(entity_id=self.parent.category_id,period=Period(2026,11))),
+        ):
+            with self.subTest(action=action,params=params):
+                change=self.plan(action,**params)
+                self.assertIn(missing,sheet_rows(change.output.sheets[LABEL_SHEET]))
+                self.assertNotIn(missing[0],change.output.sheets)
+                self.assertEqual(change.output.sheets['Архив'],self.book.sheets['Архив'])
+                self.assertEqual(change.output.sheets['Траты'].cells[2,4],100)
+
+    def test_move_ignores_unrelated_missing_archive(self):
+        self.book=self.plan('create',name='Получатель',subcategories=('Другая',)).output
+        self.add_missing_archive_reference()
+        from finance_bot.category_schema import parse_registry,REGISTRY_HEADERS
+        meta=WorkbookMetadata.from_rows(sheet_rows(self.book.sheets[METADATA_SHEET]))
+        registry=parse_registry(meta,{key:sheet_rows(self.book.sheets[key]) for key in REGISTRY_HEADERS})
+        target=registry.categories[-1]
+        change=prepare_change(self.book,spreadsheet_id='copy-id',expected_revision=1,request_id=new_id(),action='move',entity_id=self.child.subcategory_id,parent_id=target.category_id)
+        self.assertEqual(change.output.sheets['Траты'].cells[2,7],self.parent.category_id)
+        self.assertEqual(change.output.sheets['Архив'],self.book.sheets['Архив'])
+
+    def test_rename_still_refuses_missing_archive_before_mutation(self):
+        self.add_missing_archive_reference()
+        before=fingerprint(self.book)
+        with self.assertRaisesRegex(ValueError,'indexed archive sheet is missing'):
+            self.plan('rename',entity_id=self.parent.category_id,name='Покупки')
+        self.assertEqual(fingerprint(self.book),before)

@@ -145,3 +145,12 @@ class CategoryManagementTests(unittest.TestCase):
         with self.assertRaisesRegex(CategoryManagementError,'подкатегория'):
             self.manager.preview(action='move',entity_id=child.subcategory_id,parent_id=registry.categories[-1].category_id)
         self.assertEqual(self.store.writes,before)
+
+    def test_missing_archive_rename_is_actionable_and_does_not_write(self):
+        from finance_bot.category_projections import LABEL_SHEET
+        rows=sheet_rows(self.current.sheets[LABEL_SHEET])
+        rows.append(['Архив (удалённый снимок)','A9','category',self.registry.categories[0].category_id,''])
+        self.current.sheets[LABEL_SHEET]=table_sheet(LABEL_SHEET,rows)
+        with self.assertRaisesRegex(CategoryManagementError,'отсутствующий архивный лист'):
+            self.preview()
+        self.assertEqual(self.store.writes,0)

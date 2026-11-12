@@ -125,6 +125,7 @@ class CategoryManager:
                 "Ambiguous subcategory name within a category.": "В категории уже есть подкатегория с таким названием. Выберите другое имя.",
                 "Cannot add a subcategory to an inactive parent.": "Нельзя добавить подкатегорию в неактивную категорию.",
                 "Move requires active entities of the same transaction type.": "Для переноса нужны активные категории одного типа операции.",
+                "An indexed archive sheet is missing.": "Не удалось переименовать историю: в индексе есть отсутствующий архивный лист. Нужно восстановить архив или согласовать исправление индекса. Таблица не изменена.",
             }
             raise CategoryManagementError(messages.get(str(exc), "Недопустимое изменение: проверьте справочник и индексированные архивы.")) from exc
         if action == "create":

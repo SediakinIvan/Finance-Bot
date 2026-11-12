@@ -105,24 +105,27 @@ def prepare_change(
             ledger.cells[number, 2] = registry.category(category_id).name
             ledger.cells[number, 3] = registry.subcategory(child_id).name
     labels = read_table(sheet_rows(output.sheets[LABEL_SHEET]), LABEL_HEADERS)
-    for item in labels:
-        sheet = output.sheets.get(str(item["sheet"]))
-        if sheet is None:
-            raise ValueError("An indexed archive sheet is missing.")
-        key = _coordinate(str(item["cell"]))
-        parent = registry.category(str(item["category_id"]))
-        if item["kind"] == "subcategory":
-            child = registry.subcategory(str(item["subcategory_id"]))
-            value = child.name
-        elif item["kind"] == "heading":
-            value = "Подкатегории: " + parent.name
-        elif item["kind"] == "category":
-            value = parent.name
-        else:
-            raise ValueError("Unknown indexed label kind.")
-        if key in sheet.formulas:
-            raise ValueError("An archive label unexpectedly contains a formula.")
-        sheet.cells[key] = value
+    # Only rename changes historical labels. Other actions must not depend
+    # on old snapshots that may no longer exist in the workbook.
+    if action == "rename":
+        for item in labels:
+            sheet = output.sheets.get(str(item["sheet"]))
+            if sheet is None:
+                raise ValueError("An indexed archive sheet is missing.")
+            key = _coordinate(str(item["cell"]))
+            parent = registry.category(str(item["category_id"]))
+            if item["kind"] == "subcategory":
+                child = registry.subcategory(str(item["subcategory_id"]))
+                value = child.name
+            elif item["kind"] == "heading":
+                value = "Подкатегории: " + parent.name
+            elif item["kind"] == "category":
+                value = parent.name
+            else:
+                raise ValueError("Unknown indexed label kind.")
+            if key in sheet.formulas:
+                raise ValueError("An archive label unexpectedly contains a formula.")
+            sheet.cells[key] = value
     # Keep trusted row snapshots in sync with a global rename.
     snapshots = read_table(sheet_rows(output.sheets[SNAPSHOT_SHEET]), SNAPSHOT_HEADERS)
     for item in snapshots:

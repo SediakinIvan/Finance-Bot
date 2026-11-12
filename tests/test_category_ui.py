@@ -24,7 +24,7 @@ class CategoryUITests(unittest.IsolatedAsyncioTestCase):
         self.update = self.make_update()
 
     def make_update(self, data=None, user=1, chat='private', text=''):
-        query = None if data is None else NS(data=data, from_user=NS(id=user), answer=AsyncMock(), edit_message_text=AsyncMock())
+        query = None if data is None else NS(data=data, from_user=NS(id=user), answer=AsyncMock(), edit_message_text=AsyncMock(), edit_message_reply_markup=AsyncMock())
         return NS(effective_user=NS(id=user), effective_chat=NS(type=chat), callback_query=query,
                   effective_message=NS(text=text, reply_text=AsyncMock()))
 
@@ -163,3 +163,33 @@ class CategoryUITests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await ui.reject_stale_category_callback(self.make_update(old),self.context))
         self.assertEqual(self.context.user_data['pnl_transaction_id'],'pending-financial-save')
         self.store.confirm_category_change.assert_not_called()
+
+    async def test_preview_error_keeps_draft_and_close_preserves_error_message(self):
+        await self.start();await self.click('new');await self.click('type:expense');await self.text('Одежда')
+        self.store.preview_category_change.side_effect=SheetsError('Отсутствует архивный лист')
+        state,update=await self.text('Белье\nВерхняя одежда\nОдежда\nАксессуары')
+        self.assertEqual(state,ui.TEXT)
+        self.assertIn('Отсутствует архивный лист',update.effective_message.reply_text.await_args.args[0])
+        self.assertEqual(self.context.user_data[ui.FLOW_KEY]['draft']['name'],'Одежда')
+        self.assertEqual(self.context.user_data[ui.FLOW_KEY]['phase'],'new_children')
+        _,closed=await self.click('cancel')
+        closed.callback_query.edit_message_text.assert_not_awaited()
+        closed.callback_query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+        self.assertIn('Таблица не изменена',closed.effective_message.reply_text.await_args.args[0])
+        self.store.confirm_category_change.assert_not_called()
+
+    async def test_close_after_success_preserves_success_and_does_not_claim_cancel(self):
+        await self.start();await self.click('new');await self.click('type:expense');await self.text('Одежда');await self.text('Одежда')
+        await self.click('confirm')
+        self.assertEqual(self.context.user_data[ui.FLOW_KEY]['phase'],'complete')
+        _,closed=await self.click('cancel')
+        closed.callback_query.edit_message_text.assert_not_awaited()
+        self.assertNotIn('не изменена',closed.effective_message.reply_text.await_args.args[0])
+        self.store.confirm_category_change.assert_called_once()
+
+    async def test_pending_close_does_not_claim_rollback(self):
+        self.store.category_change_status.return_value=CategoryPreview(new_id(),'rename','applying')
+        await self.start();_,closed=await self.click('cancel')
+        self.assertIn('не откатывает',closed.effective_message.reply_text.await_args.args[0])
+        self.store.cancel_category_change.assert_not_called()
+        closed.callback_query.edit_message_text.assert_not_awaited()
