@@ -27,10 +27,15 @@ def failure_reason(error):
     return "Failure type: " + type(chain[-1]).__name__
 
 
-def main():
+def main(expected_spreadsheet_id=None):
     stage = "configuration"
     try:
         settings = Settings.from_environment()
+        if expected_spreadsheet_id is not None:
+            configured = {settings.spreadsheet_id_for_user(user)
+                          for user in settings.authorized_telegram_user_ids}
+            if configured != {expected_spreadsheet_id}:
+                raise SchemaError("Release target does not match the expected production workbook.")
         directory = Path(settings.category_change_state_dir)
         stage = "persistent journal permissions"
         with NamedTemporaryFile(dir=directory, prefix=".release-check-"):
@@ -62,4 +67,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected-spreadsheet-id")
+    main(parser.parse_args().expected_spreadsheet_id)

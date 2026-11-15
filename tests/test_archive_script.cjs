@@ -2,11 +2,12 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
 const source=fs.readFileSync('data/macros.gs','utf8');
 const id=n=>'00000000-0000-4000-8000-'+String(n).padStart(12,'0');
 const clone=x=>JSON.parse(JSON.stringify(x));
-function environment(answers=[],failSnapshot=false){
-  const sheets=new Map(),cleared=[],deleted=[],rules=[];let sequence=99;
+function environment(answers=[],failSnapshot=false,autoRebind=false){
+  const sheets=new Map(),cleared=[],deleted=[],rules=[],writes=[];let sequence=99;
   class Sheet{
-    constructor(name,rows=[]){this.name=name;this.rows=clone(rows);this.maxRows=100;this.charts=[];sheets.set(name,this);}
+    constructor(name,rows=[]){this.sheetId=sheets.size+1;this.name=name;this.rows=clone(rows);this.maxRows=100;this.charts=[];sheets.set(name,this);}
     getName(){return this.name;}
+    getSheetId(){return this.sheetId;}
     getLastRow(){let n=this.rows.length;while(n&&this.rows[n-1].every(x=>x===''))n--;return n;}
     getMaxColumns(){return 26;}
     getMaxRows(){return Math.max(this.maxRows,this.rows.length);}
@@ -15,12 +16,14 @@ function environment(answers=[],failSnapshot=false){
     setColumnWidth(){return this;}
     getCharts(){return this.charts;}
     updateChart(chart){this.charts=[chart];}
-    getDataRange(){return this.getRange(1,1,Math.max(1,this.getLastRow()),Math.max(1,...this.rows.map(x=>x.length)));}
+    getDataRange(){return this.getRange(1,1,Math.max(1,this.getLastRow(),this.emptyFormulaRows||0),Math.max(1,...this.rows.map(x=>x.length)));}
     getRange(r,c,h=1,w=1){const sheet=this;return {
       getSheet(){return sheet;},
       getValues(){return Array.from({length:h},(_,i)=>Array.from({length:w},(_,j)=>sheet.rows[r+i-1]?.[c+j-1]??''));},
       setValues(values){
+        writes.push({sheet:sheet.name,r,c,h,w,values:clone(values)});
         if(failSnapshot&&sheet.name.startsWith('_pending'))throw new Error('simulated snapshot failure');
+        if(sheet.name.startsWith('_pending'))sheet.emptyFormulaRows=0;
         for(let i=0;i<h;i++){while(sheet.rows.length<r+i)sheet.rows.push([]);for(let j=0;j<w;j++)sheet.rows[r+i-1][c+j-1]=values[i][j];}
         return this;
       },
@@ -29,7 +32,7 @@ function environment(answers=[],failSnapshot=false){
     };}
     clearContents(){this.rows=[];}
     setName(name){sheets.delete(this.name);this.name=name;sheets.set(name,this);return this;}
-    copyTo(){const copy=new Sheet('Copy of '+this.name,this.rows);copy.charts=this.charts.slice();return copy;}
+    copyTo(){const copy=new Sheet('Copy of '+this.name,this.rows);copy.emptyFormulaRows=this.emptyFormulaRows;copy.charts=this.charts.map(chart=>autoRebind?{...chart,getRanges:()=>chart.getRanges().map(range=>copy.getRange(1,1))}:chart);return copy;}
   }
   const ss={getId:()=> 'copy-id',getSpreadsheetTimeZone:()=> 'Europe/Moscow',getSheetByName:n=>sheets.get(n),insertSheet:n=>new Sheet(n),deleteSheet:s=>{deleted.push(s.name);sheets.delete(s.name);}};
   const scope={module:{exports:{}},Date,Map,Set,console,
@@ -52,7 +55,7 @@ function environment(answers=[],failSnapshot=false){
   display.rows[0][6]='Подкатегории: Продукты';display.rows[0][7]=100;
   display.rows[1][6]='Подкатегория';display.rows[1][7]='Сумма';
   display.rows[2][6]='Магазин';display.rows[2][7]=100;
-  return {scope,api,ss,sheets,cleared,deleted,rules,Sheet};
+  return {scope,api,ss,sheets,cleared,deleted,rules,writes,Sheet};
 }
 {
   const e=environment(['no']);e.scope.saveMonthlyReport();
@@ -107,7 +110,7 @@ function environment(answers=[],failSnapshot=false){
 console.log('Apps Script archive: first archive, confirmed clear, cancellation, copy failure, duplicate-period refusal and mixed-period safety passed');
 {
   const e=environment(['no']);
-  const originalRange={getA1Notation:()=> 'G3:H3'};
+  const originalRange={getA1Notation:()=> 'G3:H3',getSheet:()=>e.sheets.get(e.api.FB.analytics)};
   e.sheets.get(e.api.FB.analytics).charts=[{
     getRanges:()=>[originalRange],
     modify(){const ranges=[];return {clearRanges(){return this;},addRange(range){ranges.push(range);return this;},build(){return {ranges};}};}
@@ -156,3 +159,84 @@ console.log('Apps Script archive: dynamic columns and actual/zero deactivation p
   assert.equal(ledger.rows[2][8],'');
 }
 console.log('Apps Script manual input: dropdowns, range paste, row clearing and expansion beyond 155 passed');
+{
+  const e=environment(['no'],false,true),source=e.sheets.get(e.api.FB.analytics);
+  source.charts=Array.from({length:8},()=>({
+    getRanges:()=>[{getA1Notation:()=> 'G3:H3',getSheet:()=>source}],
+    modify(){throw new Error('Already rebound native chart must not be rebuilt');}
+  }));
+  e.scope.saveMonthlyReport();
+  assert.equal(e.sheets.get('Архив (Ноябрь 2026)').charts.length,8);
+  assert.equal(e.sheets.get(e.api.FB.meta).rows.find(r=>r[0]==='access_mode')[1],'open');
+  assert.equal(e.sheets.get(e.api.FB.ledger).rows[1][3],100);
+}
+console.log('Apps Script archive: eight natively rebound charts skip redundant rebuilds');
+{
+  const e=environment(),items=[];let added=false;
+  e.scope.SpreadsheetApp.getUi=()=>({createMenu(name){
+    assert.equal(name,'Финансы ИФТ');return {
+      addItem(label,handler){items.push([label,handler]);return this;},
+      addToUi(){added=true;}
+    };
+  }});
+  const before=clone(e.sheets.get(e.api.FB.ledger).rows);
+  e.scope.onOpen();
+  assert.deepEqual(items,[['Сохранить месячный отчёт','saveMonthlyReport']]);
+  assert.equal(added,true);assert.deepEqual(e.sheets.get(e.api.FB.ledger).rows,before);
+}
+{
+  const e=environment(),before=clone(e.sheets.get(e.api.FB.meta).rows);
+  e.scope.SpreadsheetApp.getUi=()=>{throw new Error('Cannot call SpreadsheetApp.getUi() from this context.');};
+  assert.throws(()=>e.scope.saveMonthlyReport(),/Финансы ИФТ/);
+  assert.deepEqual(e.sheets.get(e.api.FB.meta).rows,before);
+  assert.equal(e.sheets.has(e.api.FB.archive),false);assert.equal(e.cleared.length,0);
+}
+console.log('Apps Script menu: sheet entry point and no-UI failure before writes passed');
+{
+  const e=environment(['no']);
+  // Sheets counts formulas returning "" in the live data range; freezing
+  // their empty values shrinks the copied sheet's getDataRange().
+  e.sheets.get(e.api.FB.analytics).emptyFormulaRows=40;
+  e.scope.saveMonthlyReport();
+  const snapshot=e.sheets.get('Архив (Ноябрь 2026)');
+  assert.ok(snapshot);assert.ok(snapshot.getDataRange().getValues().length<40);
+  assert.equal(snapshot.rows[2][1],100);
+  assert.equal(e.sheets.get(e.api.FB.meta).rows.find(r=>r[0]==='access_mode')[1],'open');
+  assert.equal(e.cleared.length,0);
+}
+console.log('Apps Script snapshot: shrinking empty-formula bounds preserve exact readback');
+
+// Verify the complete archive flow for every month, using a past year so
+// advancement cannot accidentally follow the wall-clock date.
+for(let month=1;month<=12;month++){
+  const e=environment(['yes']),analytic=e.sheets.get(e.api.FB.analytics);
+  analytic.rows[0][3]=month;analytic.rows[1][3]=2024;
+  e.sheets.get(e.api.FB.ledger).rows[1][0]='11.'+String(month).padStart(2,'0')+'.2024';
+  const before=clone(analytic.rows);
+  e.scope.saveMonthlyReport();
+  assert.equal(analytic.rows[0][3],month===12?1:month+1);
+  assert.equal(analytic.rows[1][3],month===12?2025:2024);
+  const changed=clone(before);changed[0][3]=month===12?1:month+1;changed[1][3]=month===12?2025:2024;
+  assert.deepEqual(clone(analytic.rows),changed);
+  const periodWrites=e.writes.filter(x=>x.sheet===e.api.FB.analytics);
+  assert.equal(periodWrites.length,1);
+  assert.deepEqual([periodWrites[0].r,periodWrites[0].c,periodWrites[0].h,periodWrites[0].w],[1,4,month===12?2:1,1]);
+  const snapshot=[...e.sheets.values()].find(x=>x.name.startsWith('Архив ('));
+  assert.equal(snapshot.rows[0][3],month);assert.equal(snapshot.rows[1][3],2024);
+  assert.equal(snapshot.rows[2][1],100);
+  assert.deepEqual(e.sheets.get(e.api.FB.archive).rows[1].slice(1,5),[0,100,-100,100]);
+}
+console.log('Apps Script month advance: all 12 months, December year rollover, untouched D2 and original archive period/totals passed');
+for(const mode of ['decline-replace','decline-clear','snapshot-failure','invalid-row','mixed-period','clear-failure']){
+  const e=environment(mode.startsWith('decline')?['no']:['yes'],mode==='snapshot-failure');
+  const analytic=e.sheets.get(e.api.FB.analytics);
+  if(mode==='decline-replace')new e.Sheet('Архив (Ноябрь 2026)',[['old',900]]);
+  if(mode==='invalid-row')e.sheets.get(e.api.FB.ledger).rows[1][2]='';
+  if(mode==='mixed-period')e.sheets.get(e.api.FB.ledger).rows[1][0]='01.12.2026';
+  if(mode==='clear-failure')e.sheets.get(e.api.FB.snapshots).clearContents=()=>{throw new Error('snapshot cleanup failed');};
+  if(mode.startsWith('decline'))e.scope.saveMonthlyReport();
+  else assert.throws(()=>e.scope.saveMonthlyReport());
+  assert.equal(analytic.rows[0][3],11,mode);assert.equal(analytic.rows[1][3],2026,mode);
+  assert.equal(e.writes.filter(x=>x.sheet===e.api.FB.analytics).length,0,mode);
+}
+console.log('Apps Script month advance: cancellations and pre-advance failures leave period untouched');

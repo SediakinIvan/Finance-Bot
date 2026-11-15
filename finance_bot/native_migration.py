@@ -114,6 +114,13 @@ def _write_sheet(spreadsheet: Any, sheet) -> None:
         ] if len(rows) > 1 else [
             {"range": _quote(sheet.title) + "G1:K1", "values": [rows[0][6:11]]},
         ]
+    elif sheet.title in {"Аналитика", "Категории"}:
+        # Never clear a live view. Its plan includes explicit blanks for retired
+        # legacy cells and preserves all owner-authored cells outside the view.
+        from finance_bot.category_migration import cell_address
+        data = [{"range": _quote(sheet.title) + cell_address(*coordinate), "values": [[value]]}
+                for coordinate, value in sorted(sheet.cells.items())
+                if coordinate not in sheet.formulas]
     else:
         worksheet.clear()
         data = [{"range": _quote(sheet.title) + "A1", "values": rows}]
@@ -192,7 +199,7 @@ def install_copy(
     if not state.get("dashboard_presentation_installed"):
         from finance_bot.category_projections import LABEL_SHEET
         from finance_bot.report_presentation import apply_report_presentation
-        apply_report_presentation(target, plan.output.sheets["Аналитика"], sheet_rows(plan.output.sheets[LABEL_SHEET]))
+        apply_report_presentation(target, plan.output.sheets["Аналитика"], sheet_rows(plan.output.sheets[LABEL_SHEET]), preserve_existing=True)
         target.batch_update({"requests": [{"updateDimensionProperties": {
             "range": {"sheetId": target.worksheet("Траты").id, "dimension": "COLUMNS", "startIndex": 6, "endIndex": 11},
             "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}}]})
@@ -222,19 +229,19 @@ def install_copy(
 
 def verify_and_finalize_copy(
     source, plan: MigrationPlan, target: Any, script_proof: dict, *,
-    confirmed: bool,
+    confirmed: bool, script_installation_deferred: bool = False,
 ) -> None:
     """Read native computed values and publish ready/open as the final write."""
     if confirmed is not True or target.id != plan.spreadsheet_id:
         raise MigrationError("Confirm the exact target before finalization.")
-    if (script_proof.get("spreadsheet_id") != target.id
+    if not script_installation_deferred and (script_proof.get("spreadsheet_id") != target.id
             or script_proof.get("schema_version") != 2
             or script_proof.get("verified") is not True):
         raise MigrationError("Run verifyFinanceBotMigration in the installed Apps Script first.")
     current = read_google_spreadsheet(target)
     verify_migrated_copy(source, current)
     meta = WorkbookMetadata.from_rows(sheet_rows(current.sheets[METADATA_SHEET]))
-    if script_proof.get("taxonomy_revision") != meta.taxonomy_revision:
+    if not script_installation_deferred and script_proof.get("taxonomy_revision") != meta.taxonomy_revision:
         raise MigrationError("Apps Script proof refers to another taxonomy revision.")
     if meta.migration_state is not MigrationState.APPLYING or meta.access_mode is not AccessMode.MAINTENANCE:
         raise MigrationError("Unexpected migration state before finalization.")
@@ -248,10 +255,12 @@ def verify_and_finalize_copy(
         raise MigrationError("Native formulas are not ready.")
     from decimal import Decimal
     expected = {(3, 2): totals.expenses, (4, 2): totals.income, (5, 2): totals.balance}
-    for row in range(9, view.last_row + 1):
-        category_id = view.cell(row, 4)
-        if category_id:
-            expected[row, 2] = totals.categories[category_id]
+    from finance_bot.category_projections import LABEL_SHEET
+    from finance_bot.category_migration import _coordinate
+    for label in sheet_rows(current.sheets[LABEL_SHEET])[1:]:
+        if label[0] == "Аналитика" and label[2] == "category":
+            row, column = _coordinate(label[1])
+            expected[row, column + 1] = totals.categories[label[3]]
     for coordinate, value in expected.items():
         try:
             observed = Decimal(view.cell(*coordinate))

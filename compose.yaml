@@ -7,8 +7,8 @@ services:
     env_file:
       - .env
     environment:
-      # Owner-approved v2 workbook; overrides the previous v1 value in .env.
-      GOOGLE_SHEET_ID: 1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA
+      # Production workbook; publish v2 only after its verified migration.
+      GOOGLE_SHEET_ID: 1I6_HFCMVmxOD5buP6RdhtfJHld66tj7oMGArpW4AEC4
       # Temporarily disabled by the owner until their workbooks migrate to v2.
       TELEGRAM_USER_SHEETS: ""
       GOOGLE_CREDENTIALS_FILE: /run/secrets/google-service-account.json

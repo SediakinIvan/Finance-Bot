@@ -8,6 +8,13 @@ from finance_bot.category_schema import SchemaError
 
 
 class ReleaseCheckTests(unittest.TestCase):
+    def test_wrong_production_target_is_rejected_before_any_google_call(self):
+        settings = SimpleNamespace(authorized_telegram_user_ids={1}, spreadsheet_id_for_user=lambda _: 'ift-book')
+        with patch('finance_bot.release_check.Settings.from_environment', return_value=settings), patch('finance_bot.release_check.V2GoogleSheetsStore') as store, patch('builtins.print'):
+            with self.assertRaises(SystemExit):
+                main(expected_spreadsheet_id='production-book')
+            store.assert_not_called()
+
     def test_schema_cause_is_reported_without_outer_response(self):
         error = RuntimeError('secret-token-or-api-body')
         error.__cause__ = SchemaError('Workbook is not ready; finish migration or recovery.')

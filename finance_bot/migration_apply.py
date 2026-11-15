@@ -26,6 +26,7 @@ from finance_bot.category_schema import (
 from finance_bot.ledger import LedgerRow, reconcile_rows, require_valid
 from finance_bot.migration_mapping import ReviewedMapping, compile_label_index
 from finance_bot.taxonomy import Period, Taxonomy
+from finance_bot.migration_preservation import preserve_view, verify_owner_cells
 
 
 class MigrationError(ValueError):
@@ -118,7 +119,7 @@ def prepare_migration(
         raise MigrationError("Resolve legacy operation findings before applying migration.")
     output = deepcopy(source)
     output.sheets.update(registry_sheets(taxonomy))
-    output.sheets["Категории"] = taxonomy_view(taxonomy)
+    output.sheets["Категории"] = preserve_view(source, taxonomy_view(taxonomy))
     ledger = output.sheets["Траты"]
     # Refuse to overwrite any pre-existing custom columns beyond the legacy A:F.
     if any(column > 6 and value not in ("", None) for (_, column), value in ledger.cells.items()):
@@ -155,7 +156,8 @@ def prepare_migration(
     except (ValueError, OverflowError) as exc:
         raise MigrationError("Invalid selected reporting period.") from exc
     for projection in analytics_sheets(taxonomy, period, preferred_categories=preferred):
-        output.sheets[projection.title] = projection
+        output.sheets[projection.title] = (preserve_view(source, projection)
+                                          if projection.title == "Аналитика" else projection)
     metadata = WorkbookMetadata(taxonomy.spreadsheet_id, 2, taxonomy.revision,
                                 MigrationState.APPLYING, AccessMode.MAINTENANCE)
     output.sheets[METADATA_SHEET] = table_sheet(METADATA_SHEET, metadata.to_rows())
@@ -166,6 +168,13 @@ def prepare_migration(
 
 def verify_migrated_copy(source: WorkbookSnapshot, output: WorkbookSnapshot) -> None:
     """Check that migration preserves financial source fields and archive values."""
+    for coordinate in ((1, 4), (2, 4)):
+        if output.sheets["Аналитика"].cell(*coordinate) != source.sheets["Аналитика"].cell(*coordinate):
+            raise MigrationError("Migration changed the selected reporting period.")
+    try:
+        verify_owner_cells(source, output)
+    except ValueError as exc:
+        raise MigrationError(str(exc)) from exc
     for name, original in source.sheets.items():
         if name in {"Аналитика", "Категории"}:
             continue  # It is a generated view; compare totals separately in Sheets.

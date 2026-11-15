@@ -99,6 +99,19 @@ class NativeMigrationTests(unittest.TestCase):
             verify_and_finalize_copy(self.source, self.plan, self.target, {}, confirmed=True)
         self.assertEqual(self.target.writes, [])
 
+    def test_explicit_owner_deferred_script_still_verifies_native_financial_results(self):
+        current = self.native_result()
+        self.target = FakeBook(current)
+        with patch("finance_bot.native_migration.read_google_spreadsheet", side_effect=[deepcopy(current), deepcopy(current)]):
+            verify_and_finalize_copy(self.source, self.plan, self.target, {}, confirmed=True, script_installation_deferred=True)
+        self.assertEqual(dict(self.target.worksheet(METADATA_SHEET).rows[1:])["access_mode"], "open")
+        current.sheets["Аналитика"].cells[3, 2] = 999
+        self.target = FakeBook(current)
+        with patch("finance_bot.native_migration.read_google_spreadsheet", return_value=current):
+            with self.assertRaises(MigrationError):
+                verify_and_finalize_copy(self.source, self.plan, self.target, {}, confirmed=True, script_installation_deferred=True)
+        self.assertEqual(self.target.writes, [])
+
 
 if __name__ == "__main__":
     unittest.main()

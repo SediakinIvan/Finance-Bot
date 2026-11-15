@@ -45,8 +45,42 @@ def report_presentation_requests(sheet_id, labels, category_count, existing_char
     return requests
 
 
-def apply_report_presentation(target, summary, label_rows, title="Аналитика"):
-    metadata = target.fetch_sheet_metadata(params={"fields": "sheets(properties(sheetId,title),charts(chartId))"})
+def preserve_chart_requests(requests, existing_charts):
+    """Migrate known legacy chart sources in place; keep unrelated objects."""
+    def area(spec):
+        sources = spec.get("pieChart", {}).get("domain", {}).get("sourceRange", {}).get("sources", [])
+        if len(sources) != 1:
+            return None
+        grid = sources[0]
+        return (grid.get("sheetId"), grid.get("startColumnIndex", 0), grid.get("startRowIndex", 0))
+    result, used = [], set()
+    for request in requests:
+        if "addChart" not in request:
+            result.append(request)
+            continue
+        chart = request["addChart"]["chart"]
+        key = area(chart["spec"])
+        candidates = [x for x in existing_charts if area(x["spec"]) in (
+            key, (key[0], key[1], key[2] - 2) if key and key[1] else None)]
+        if len(candidates) > 1:
+            raise ValueError("Ambiguous legacy chart source; cannot migrate dashboard")
+        if not candidates:
+            result.append(request)
+            continue
+        identifier = candidates[0]["chartId"]
+        if identifier in used:
+            raise ValueError("Legacy chart matches multiple report blocks")
+        used.add(identifier)
+        result.extend([
+            {"updateChartSpec": {"chartId": identifier, "spec": chart["spec"]}},
+            {"updateEmbeddedObjectPosition": {"objectId": identifier,
+                "newPosition": chart["position"], "fields": "*"}},
+        ])
+    return result
+
+
+def apply_report_presentation(target, summary, label_rows, title="Аналитика", *, preserve_existing=False):
+    metadata = target.fetch_sheet_metadata(params={"fields": "sheets(properties(sheetId,title),charts)"})
     properties = next(item for item in metadata["sheets"] if item["properties"]["title"] == title)
     sheet_id = properties["properties"]["sheetId"] if "sheetId" in properties["properties"] else target.worksheet(title).id
     labels = [list(row) for row in label_rows[1:] if row[0] == title]
@@ -55,8 +89,11 @@ def apply_report_presentation(target, summary, label_rows, title="Аналити
             value = summary.cell(*_coordinate(row[1]))
             row.append(value.removeprefix("Подкатегории: ") + ": подкатегории")
     category_count = sum(row[2] == "category" for row in labels)
+    charts = properties.get("charts", [])
     requests = report_presentation_requests(sheet_id, labels, category_count,
-        [item["chartId"] for item in properties.get("charts", [])])
+        [] if preserve_existing else [item["chartId"] for item in charts])
+    if preserve_existing:
+        requests = preserve_chart_requests(requests, charts)
     if title == "Аналитика":
         for item in metadata["sheets"]:
             name = item["properties"]["title"]

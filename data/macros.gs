@@ -201,8 +201,16 @@ function fbArchiveValues(rows,registry,period){
   });
   return {income,expenses,balance:income-expenses,totals};
 }
+function onOpen(){
+  SpreadsheetApp.getUi().createMenu('Финансы ИФТ')
+    .addItem('Сохранить месячный отчёт','saveMonthlyReport').addToUi();
+}
 function saveMonthlyReport(){
-  const ss=SpreadsheetApp.getActiveSpreadsheet(),ui=SpreadsheetApp.getUi(),lock=LockService.getDocumentLock();
+  const ss=SpreadsheetApp.getActiveSpreadsheet();
+  let ui;
+  try{ui=SpreadsheetApp.getUi();}
+  catch(error){throw new Error('Нет доступа к интерфейсу таблицы. Перезагрузите ИФТ-таблицу и выберите «Финансы ИФТ → Сохранить месячный отчёт». Данные не изменены.');}
+  const lock=LockService.getDocumentLock();
   fbMetadata(ss,true);lock.waitLock(30000);
   let cleanExit=false,archiveTouched=false;
   try{
@@ -249,14 +257,22 @@ function saveMonthlyReport(){
     // IDs belong in the protected label index, not the visible monthly report.
     // Keep D1:D2 (reporting period), but remove summary IDs in D8 and below.
     const snapshotView=view.map((row,i)=>row.map((value,j)=>i>=7&&j===3?'':value));
-    const temp=analytic.copyTo(ss);temp.setName('_pending_'+Utilities.getUuid().slice(0,8));temp.getDataRange().setValues(snapshotView);
+    const temp=analytic.copyTo(ss);temp.setName('_pending_'+Utilities.getUuid().slice(0,8));
+    // Freezing formulas can shrink getDataRange() when trailing formulas
+    // evaluate to empty strings. Write and verify the same explicit rectangle.
+    const snapshotRange=temp.getRange(1,1,snapshotView.length,snapshotView[0].length);
+    snapshotRange.setValues(snapshotView);
     if(JSON.stringify(summary.getRange(target,1,1,last).getValues()[0])!==JSON.stringify(values))throw new Error('Archive readback mismatch');
-    if(JSON.stringify(temp.getDataRange().getValues())!==JSON.stringify(snapshotView))throw new Error('Snapshot readback mismatch');
+    if(JSON.stringify(snapshotRange.getValues())!==JSON.stringify(snapshotView))throw new Error('Snapshot readback mismatch');
     // Freeze the readable dashboard as-is. Never overlay the internal detail
     // table on its blocks/charts. Rebind chart sources to the frozen copy.
     temp.getCharts().forEach(chart=>{
+      const ranges=chart.getRanges();
+      // Native copyTo already redirects charts to the copied sheet. Rebuilding
+      // all correctly copied charts is slow and can stall archive completion.
+      if(ranges.every(range=>range.getSheet().getSheetId()===temp.getSheetId()))return;
       const builder=chart.modify().clearRanges();
-      chart.getRanges().forEach(range=>builder.addRange(temp.getRange(range.getA1Notation())));
+      ranges.forEach(range=>builder.addRange(temp.getRange(range.getA1Notation())));
       temp.updateChart(builder.build());
     });
     if(old)ss.deleteSheet(old);temp.setName(archiveName);
@@ -268,8 +284,10 @@ function saveMonthlyReport(){
     const ledger=ss.getSheetByName(FB.ledger);
     if(ledger.getLastRow()>1)ledger.getRange(2,1,ledger.getLastRow()-1,FB.header.length).clearContent();
     const identities=ss.getSheetByName(FB.snapshots);identities.clearContents();identities.getRange(1,1,1,6).setValues([FB.snapshotHeader]);
+    if(period.month===12)analytic.getRange(1,4,2,1).setValues([[1],[period.year+1]]);
+    else analytic.getRange(1,4).setValues([[period.month+1]]);
     cleanExit=true;
-    ui.alert('Архив проверен, операции очищены. Задайте следующий месяц в Аналитика!D1.');
+    ui.alert('Архив проверен, операции очищены. Аналитика переключена на следующий месяц.');
   }finally{
     // Validation failures before archive writes are safe to fix and retry.
     // Partial archive writes still require recovery and remain in maintenance.
