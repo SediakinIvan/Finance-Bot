@@ -63,6 +63,20 @@ def main(expected_spreadsheet_id=None):
         reason = failure_reason(exc).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
         print(f"::error title=Release compatibility check::{stage}: {reason}", flush=True)
         raise SystemExit("Release blocked before container replacement.") from None
+    if getattr(settings, "month_archive_enabled", False):
+        stage = "IFT archive endpoint protocol"
+        try:
+            import asyncio
+            from uuid import uuid4
+            from finance_bot.archive_client import ArchiveClient
+            archive = ArchiveClient(url=settings.month_archive_url, key=settings.month_archive_key,
+                owner=settings.allowed_telegram_user_id, spreadsheet=settings.spreadsheet_id,
+                directory=settings.category_change_state_dir)
+            result = asyncio.run(archive.action("status", str(uuid4())))
+            if result["status"] != "not_found":
+                raise ValueError("Unexpected health check response")
+        except Exception:
+            raise SystemExit("Release blocked before container replacement: IFT archive endpoint check failed.") from None
     print("Release check passed: all configured workbooks are v2/ready or have a supported recovery journal; journal is writable.")
 
 

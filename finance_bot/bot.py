@@ -28,6 +28,7 @@ from telegram.ext import (
     filters,
 )
 
+from finance_bot import archive_ui
 from finance_bot.analytics import CategoryAnalytics, MonthlyAnalytics
 from finance_bot.charts import render_donut_chart
 from finance_bot.config import Settings
@@ -116,7 +117,7 @@ def _cancel_keyboard() -> list[list[InlineKeyboardButton]]:
     return [[InlineKeyboardButton("Отмена", callback_data="flow:cancel")]]
 
 
-def _main_menu_keyboard() -> ReplyKeyboardMarkup:
+def _main_menu_keyboard(archive_enabled=False) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [ADD_TODAY_TRANSACTION_BUTTON, ADD_YESTERDAY_TRANSACTION_BUTTON],
@@ -125,6 +126,7 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
             [ANALYTICS_BUTTON, CATEGORY_ANALYTICS_BUTTON],
             [VERSION_BUTTON, CANCEL_TRANSACTION_BUTTON],
             [category_ui.CATEGORIES_BUTTON],
+            *([[archive_ui.ARCHIVE_BUTTON]] if archive_enabled else []),
         ],
         resize_keyboard=True,
         is_persistent=False,
@@ -427,10 +429,11 @@ async def start_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Кнопка «{VERSION_BUTTON}» или /version — показать версию бота\n"
         f"Кнопка «{category_ui.CATEGORIES_BUTTON}» или /categories — управление категориями\n"
         f"Кнопка «{CANCEL_TRANSACTION_BUTTON}» или /cancel — отменить текущий ввод\n"
-        "/help — показать эту справку\n\n"
+        + ("Кнопка «Архивация месяца» или /archive_month — закрыть месяц\n" if archive_ui.enabled(context.application.bot_data["settings"]) else "")
+        + "/help — показать эту справку\n\n"
         "После заполнения бот покажет строку для подтверждения и добавит её "
         "только в лист «Траты».",
-        reply_markup=_main_menu_keyboard(),
+        reply_markup=_main_menu_keyboard(archive_ui.enabled(context.application.bot_data["settings"])),
     )
 
 
@@ -1194,11 +1197,15 @@ def build_conversation(settings: Settings) -> ConversationHandler:
         rf"{re.escape(CATEGORY_ANALYTICS_BUTTON)}|"
         rf"{re.escape(VERSION_BUTTON)}|"
         rf"{re.escape(category_ui.CATEGORIES_BUTTON)}|"
+        rf"{re.escape(archive_ui.ARCHIVE_BUTTON)}|"
         rf"{re.escape(CANCEL_TRANSACTION_BUTTON)})$"
     )
     text_input = filters.TEXT & ~filters.COMMAND & ~main_menu_button & authorized
     return ConversationHandler(
         entry_points=[
+            *([CommandHandler("archive_month", archive_ui.start_archive, filters=authorized),
+               MessageHandler(filters.Regex(rf"^{re.escape(archive_ui.ARCHIVE_BUTTON)}$") & authorized, archive_ui.start_archive)]
+              if archive_ui.enabled(settings) else []),
             CommandHandler("categories", category_ui.start_categories, filters=authorized),
             MessageHandler(filters.Regex(rf"^{re.escape(category_ui.CATEGORIES_BUTTON)}$") & authorized, category_ui.start_categories),
             CommandHandler("add", start_add, filters=authorized),
@@ -1293,6 +1300,8 @@ def register_handlers(application: Application, settings: Settings) -> None:
         filters.User(user_id=settings.authorized_telegram_user_ids)
         & filters.ChatType.PRIVATE
     )
+    if archive_ui.enabled(settings):
+        application.add_handler(CallbackQueryHandler(archive_ui.archive_callback, pattern=r"^arc:(archive|clear|cancel|status):[a-f0-9-]{36}$"))
     application.add_handler(
         MessageHandler(
             filters.Regex(rf"^{re.escape(ANALYTICS_BUTTON)}$") & authorized,

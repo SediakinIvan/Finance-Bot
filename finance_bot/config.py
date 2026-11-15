@@ -24,6 +24,10 @@ class Settings:
     additional_user_sheets: dict[int, str] = field(default_factory=dict)
     category_change_state_dir: Path = Path("secrets/category-changes")
 
+    month_archive_enabled: bool = False
+    month_archive_url: str = ""
+    month_archive_key: str = field(default="", repr=False)
+
     @property
     def authorized_telegram_user_ids(self) -> frozenset[int]:
         return frozenset(
@@ -94,7 +98,21 @@ class Settings:
                 f"Google credentials file does not exist: {credentials_file}"
             )
 
+        archive_enabled = os.getenv("MONTH_ARCHIVE_ENABLED", "false").lower() == "true"
+        archive_url = os.getenv("MONTH_ARCHIVE_URL", "").strip()
+        archive_key = os.getenv("MONTH_ARCHIVE_KEY", "").strip()
+        if archive_enabled:
+            from finance_bot.archive_client import validate_archive_config
+            try:
+                validate_archive_config(archive_url, archive_key, required["GOOGLE_SHEET_ID"])
+                if additional_user_sheets:
+                    raise ValueError("Archive is limited to the primary IFT owner")
+            except ValueError as exc:
+                raise ConfigurationError(str(exc)) from None
         return cls(
+            month_archive_enabled=archive_enabled,
+            month_archive_url=archive_url,
+            month_archive_key=archive_key,
             telegram_token=required["TELEGRAM_BOT_TOKEN"],
             allowed_telegram_user_id=allowed_user_id,
             google_credentials_file=credentials_file,

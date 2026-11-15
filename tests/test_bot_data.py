@@ -490,7 +490,7 @@ class TelegramHandlerTests(unittest.TestCase):
             effective_message=SimpleNamespace(reply_text=reply_text)
         )
 
-        asyncio.run(start_help(update, SimpleNamespace()))
+        asyncio.run(start_help(update, SimpleNamespace(application=SimpleNamespace(bot_data={"settings": SimpleNamespace(month_archive_enabled=False)}))))
 
         keyboard = reply_text.await_args.kwargs["reply_markup"]
         markup = keyboard.to_dict()

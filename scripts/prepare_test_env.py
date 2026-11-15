@@ -29,10 +29,21 @@ def prepare(production, destination, token):
         raise ValueError('Missing primary owner in production configuration')
     if destination.resolve() == production.resolve():
         raise ValueError('Refusing to overwrite production configuration')
+    # Keep only the archive settings previously provisioned for this test stand.
+    # Never inherit endpoint/key from production, and never erase them on deploy.
+    archive = {}
+    if destination.exists() and read_setting(destination, 'MONTH_ARCHIVE_ENABLED') == 'true':
+        url = read_setting(destination, 'MONTH_ARCHIVE_URL')
+        key = read_setting(destination, 'MONTH_ARCHIVE_KEY')
+        if not re.fullmatch(r'https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec', url) or not re.fullmatch(r'[A-Za-z0-9_-]{32,}', key):
+            raise ValueError('Invalid saved IFT archive configuration')
+        archive = {'MONTH_ARCHIVE_ENABLED':'true','MONTH_ARCHIVE_URL':url,'MONTH_ARCHIVE_KEY':key}
     content = '\n'.join((f'TELEGRAM_BOT_TOKEN={token}', f'TELEGRAM_ALLOWED_USER_ID={owner}',
         'TELEGRAM_USER_SHEETS=', f'GOOGLE_SHEET_ID={TEST_SHEET}',
         'GOOGLE_TRANSACTIONS_SHEET=Траты', 'GOOGLE_CATEGORIES_SHEET=Категории',
         'GOOGLE_ANALYTICS_SHEET=Аналитика', 'BOT_TIMEZONE=Europe/Moscow', ''))
+    if archive:
+        content += ''.join(f'{k}={v}\n' for k,v in archive.items())
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=destination.parent, prefix='.test-env-')
     try:

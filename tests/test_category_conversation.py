@@ -44,6 +44,9 @@ class MemoryBotAPI(BaseRequest):
                 else:result.pop('reply_markup',None)
             self.last_id=key
             result=dict(result)
+            # Telegram returns inline keyboards on Message, but never a reply keyboard.
+            if result.get('reply_markup') and 'inline_keyboard' not in result['reply_markup']:
+                result.pop('reply_markup')
         else:raise AssertionError('Unexpected Bot API call: '+endpoint)
         return 200,json.dumps({'ok':True,'result':result}).encode()
 

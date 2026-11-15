@@ -157,18 +157,18 @@ function fbDropdowns(ss,registry) {
 }
 function onEdit(e) {
   if(!e||!e.range||![FB.ledger,FB.analytics].includes(e.range.getSheet().getName()))return;
-  const lock=LockService.getDocumentLock();if(!lock.tryLock(5000))return;
+  const lock=fbLock();if(!lock.tryLock(5000))return;
   try{fbMetadata(e.source,true);const r=fbRegistry(e.source);fbSync(e.source,r);fbDropdowns(e.source,r);}
   finally{lock.releaseLock();}
 }
 function refreshFinanceBotRows(){
-  const ss=SpreadsheetApp.getActiveSpreadsheet(),lock=LockService.getDocumentLock();lock.waitLock(30000);
+  const ss=SpreadsheetApp.getActiveSpreadsheet(),lock=fbLock();lock.waitLock(30000);
   try{fbMetadata(ss,true);const r=fbRegistry(ss),result=fbSync(ss,r);fbDropdowns(ss,r);
     if(result.errors.length)throw new Error('Исправьте строки: '+result.errors.join(', '));}
   finally{lock.releaseLock();}
 }
 function verifyFinanceBotMigration(){
-  const ss=SpreadsheetApp.getActiveSpreadsheet(),lock=LockService.getDocumentLock();lock.waitLock(30000);
+  const ss=SpreadsheetApp.getActiveSpreadsheet(),lock=fbLock();lock.waitLock(30000);
   try{
     const meta=fbMetadata(ss,false);
     if(meta.migration_state!=='applying'||meta.access_mode!=='maintenance')throw new Error('Unexpected migration state');
@@ -205,36 +205,33 @@ function onOpen(){
   SpreadsheetApp.getUi().createMenu('Финансы ИФТ')
     .addItem('Сохранить месячный отчёт','saveMonthlyReport').addToUi();
 }
-function saveMonthlyReport(){
-  const ss=SpreadsheetApp.getActiveSpreadsheet();
-  let ui;
-  try{ui=SpreadsheetApp.getUi();}
-  catch(error){throw new Error('Нет доступа к интерфейсу таблицы. Перезагрузите ИФТ-таблицу и выберите «Финансы ИФТ → Сохранить месячный отчёт». Данные не изменены.');}
-  const lock=LockService.getDocumentLock();
-  fbMetadata(ss,true);lock.waitLock(30000);
-  let cleanExit=false,archiveTouched=false;
-  try{
-    const before=fbMetadata(ss,true);fbSetMeta(ss,{access_mode:'maintenance'});
-    const registry=fbRegistry(ss),synced=fbSync(ss,registry);
-    if(synced.errors.length)throw new Error('Исправьте строки: '+synced.errors.join(', '));
-    SpreadsheetApp.flush();
-    const analytic=ss.getSheetByName(FB.analytics),view=analytic.getDataRange().getValues();
-    const period=fbPeriod(view),rows=fbRows(ss,FB.ledger),totals=fbArchiveValues(rows,registry,period);
-    const sourceLabels=fbRows(ss,FB.labels),liveLabels=sourceLabels.slice(1).filter(row=>row[0]===FB.analytics);
-    if(!liveLabels.length)throw new Error('Dashboard label index is missing; finish report migration first');
-    if(view[0][5]!=='ready'||!Number.isFinite(Number(view[2][1]))||!Number.isFinite(Number(view[3][1]))||
-      Math.abs(Number(view[2][1])-totals.expenses)>0.005||Math.abs(Number(view[3][1])-totals.income)>0.005||
-      !Number.isFinite(Number(view[4][1]))||Math.abs(Number(view[4][1])-totals.balance)>0.005)throw new Error('Итоги аналитики не совпадают с операциями');
-    const months=['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
-    const name=months[period.month-1]+' '+period.year,archiveName='Архив ('+name+')';
-    let summary=ss.getSheetByName(FB.archive);
-    const found=summary&&summary.getLastRow()>1?summary.getRange(2,1,summary.getLastRow()-1,1).getValues().findIndex(r=>r[0]===name):-1;
-    const old=ss.getSheetByName(archiveName);
-    if((found>=0||old)&&ui.alert('Заменить архив?','Архив за '+name+' существует. Заменить?',ui.ButtonSet.YES_NO)!==ui.Button.YES){cleanExit=true;return;}
-    // Google UI prompts release locks; always reacquire and recheck.
-    lock.waitLock(30000);
-    const unchanged=()=>JSON.stringify(fbRows(ss,FB.ledger))===JSON.stringify(rows)&&fbMetadata(ss,false).taxonomy_revision===before.taxonomy_revision&&fbPeriod(fbRows(ss,FB.analytics)).key===period.key;
-    if(!unchanged())throw new Error('Данные изменились после подтверждения');
+function fbLock(){return LockService.getScriptLock?LockService.getScriptLock():LockService.getDocumentLock();}
+function fbArchiveContext(ss){
+  const before=fbMetadata(ss,false);
+  const registry=fbRegistry(ss),synced=fbSync(ss,registry);
+  if(synced.errors.length)throw new Error('Исправьте строки: '+synced.errors.join(', '));
+  SpreadsheetApp.flush();
+  const analytic=ss.getSheetByName(FB.analytics),view=analytic.getDataRange().getValues();
+  const period=fbPeriod(view),rows=fbRows(ss,FB.ledger),totals=fbArchiveValues(rows,registry,period);
+  const sourceLabels=fbRows(ss,FB.labels),liveLabels=sourceLabels.slice(1).filter(row=>row[0]===FB.analytics);
+  if(!liveLabels.length)throw new Error('Dashboard label index is missing; finish report migration first');
+  if(view[0][5]!=='ready'||!Number.isFinite(Number(view[2][1]))||!Number.isFinite(Number(view[3][1]))||
+    Math.abs(Number(view[2][1])-totals.expenses)>0.005||Math.abs(Number(view[3][1])-totals.income)>0.005||
+    !Number.isFinite(Number(view[4][1]))||Math.abs(Number(view[4][1])-totals.balance)>0.005)throw new Error('Итоги аналитики не совпадают с операциями');
+  const months=['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+  const name=months[period.month-1]+' '+period.year,archiveName='Архив ('+name+')';
+  let summary=ss.getSheetByName(FB.archive);
+  const found=summary&&summary.getLastRow()>1?summary.getRange(2,1,summary.getLastRow()-1,1).getValues().findIndex(r=>r[0]===name):-1;
+  const old=ss.getSheetByName(archiveName);
+  return {before,registry,view,period,rows,totals,sourceLabels,liveLabels,name,archiveName,summary,found,old};
+}
+function fbArchiveUnchanged(ss,c){
+  return JSON.stringify(fbRows(ss,FB.ledger))===JSON.stringify(c.rows)&&fbMetadata(ss,false).taxonomy_revision===c.before.taxonomy_revision&&fbPeriod(fbRows(ss,FB.analytics)).key===c.period.key;
+}
+function fbSaveArchive(ss,c,touched=()=>{}){
+  const {registry,view,period,rows,totals,sourceLabels,liveLabels,name,archiveName,found,old}=c;
+  let {summary}=c;
+  const analytic=ss.getSheetByName(FB.analytics);
     const cs=ss.getSheetByName(FB.columns),columns=fbObjects(fbRows(ss,FB.columns),['category_id','column']);
     let last=Math.max(4,...columns.map(x=>Number(x.column)));
     registry.categories.filter(x=>x.type==='Расход').forEach(c=>{if(!columns.some(x=>x.category_id===c.category_id))columns.push({category_id:c.category_id,column:++last});});
@@ -246,7 +243,7 @@ function saveMonthlyReport(){
       headers[+item.column-1]=parent.name;
       values[+item.column-1]=parent.deactivated_period&&String(parent.deactivated_period)<period.key?0:totals.totals[parent.category_id];
     });
-    archiveTouched=true;
+    touched();
     summary=summary||ss.insertSheet(FB.archive);
     if(last>summary.getMaxColumns())summary.insertColumnsAfter(summary.getMaxColumns(),last-summary.getMaxColumns());
     summary.getRange(1,1,1,last).setValues([headers]);
@@ -279,20 +276,159 @@ function saveMonthlyReport(){
     const labels=sourceLabels.filter((r,i)=>i===0||r[0]!==archiveName);
     liveLabels.forEach(row=>labels.push([archiveName,...row.slice(1)]));
     const ls=ss.getSheetByName(FB.labels);ls.clearContents();fbEnsureSize(ls,labels.length,5);ls.getRange(1,1,labels.length,5).setValues(labels);
-    if(ui.alert('Очистить операции?','Архив проверен. Удалить операции за '+name+' из «Траты»?',ui.ButtonSet.YES_NO)!==ui.Button.YES){cleanExit=true;return;}
-    lock.waitLock(30000);if(!unchanged())throw new Error('Данные изменились; очистка отменена');
+  return ss.getSheetByName(archiveName);
+}
+function fbClearArchive(ss,c,stage=()=>{}){
+  const {period}=c,analytic=ss.getSheetByName(FB.analytics);
+    stage('clearing');
     const ledger=ss.getSheetByName(FB.ledger);
     if(ledger.getLastRow()>1)ledger.getRange(2,1,ledger.getLastRow()-1,FB.header.length).clearContent();
     const identities=ss.getSheetByName(FB.snapshots);identities.clearContents();identities.getRange(1,1,1,6).setValues([FB.snapshotHeader]);
+    stage('advancing');
     if(period.month===12)analytic.getRange(1,4,2,1).setValues([[1],[period.year+1]]);
     else analytic.getRange(1,4).setValues([[period.month+1]]);
-    cleanExit=true;
+    stage('complete');
+}
+function saveMonthlyReport(){
+  const ss=SpreadsheetApp.getActiveSpreadsheet();
+  let ui;
+  try{ui=SpreadsheetApp.getUi();}
+  catch(error){throw new Error('Нет доступа к интерфейсу таблицы. Перезагрузите ИФТ-таблицу и выберите «Финансы ИФТ → Сохранить месячный отчёт». Данные не изменены.');}
+  const lock=fbLock();fbMetadata(ss,true);lock.waitLock(30000);
+  let cleanExit=false,archiveTouched=false;
+  try{
+    fbSetMeta(ss,{access_mode:'maintenance'});
+    const c=fbArchiveContext(ss);
+    if((c.found>=0||c.old)&&ui.alert('Заменить архив?','Архив за '+c.name+' существует. Заменить?',ui.ButtonSet.YES_NO)!==ui.Button.YES){cleanExit=true;return;}
+    lock.waitLock(30000);
+    if(!fbArchiveUnchanged(ss,c))throw new Error('Данные изменились после подтверждения');
+    fbSaveArchive(ss,c,()=>{archiveTouched=true;});
+    if(ui.alert('Очистить операции?','Архив проверен. Удалить операции за '+c.name+' из «Траты»?',ui.ButtonSet.YES_NO)!==ui.Button.YES){cleanExit=true;return;}
+    lock.waitLock(30000);if(!fbArchiveUnchanged(ss,c))throw new Error('Данные изменились; очистка отменена');
+    fbClearArchive(ss,c);cleanExit=true;
     ui.alert('Архив проверен, операции очищены. Аналитика переключена на следующий месяц.');
   }finally{
-    // Validation failures before archive writes are safe to fix and retry.
-    // Partial archive writes still require recovery and remain in maintenance.
     if(cleanExit||!archiveTouched)fbSetMeta(ss,{access_mode:'open'});
     lock.releaseLock();
   }
+}
+// The web entry is enabled only in the separately deployed IFT script project.
+const FB_ARCHIVE_IFT='1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA';
+function fbArchiveHash(value){
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,JSON.stringify(value),Utilities.Charset.UTF_8)
+    .map(x=>('0'+((x+256)%256).toString(16)).slice(-2)).join('');
+}
+function fbArchiveSource(c){return fbArchiveHash([c.rows,c.view,c.before.taxonomy_revision,c.period.key]);}
+function fbArchiveCurrentSource(ss){
+  return fbArchiveHash([fbRows(ss,FB.ledger),ss.getSheetByName(FB.analytics).getDataRange().getValues(),fbMetadata(ss,false).taxonomy_revision,fbPeriod(fbRows(ss,FB.analytics)).key]);
+}
+function fbArchiveStored(ss,name){
+  const archive=ss.getSheetByName(name),summary=ss.getSheetByName(FB.archive);
+  return fbArchiveHash([archive?archive.getDataRange().getValues():null,summary?summary.getDataRange().getValues():null]);
+}
+function fbArchiveReply(job){
+  return {protocol:1,ok:true,request_id:job.id,status:job.status,period:job.period,name:job.name,
+    replace:job.replace||false,url:job.url||'',code:job.code||''};
+}
+function fbArchivePut(props,job){
+  props.setProperty('FB_ARCHIVE_JOB_'+job.id,JSON.stringify(job));
+  const all=props.getProperties(),jobs=Object.keys(all).filter(k=>k.startsWith('FB_ARCHIVE_JOB_'))
+    .map(k=>({key:k,job:JSON.parse(all[k])})).sort((a,b)=>b.job.created-a.job.created);
+  // Keep recent signatures valid for their full acceptance window; never evict active work.
+  jobs.slice(20).filter(x=>['complete','kept','cancelled','stale'].includes(x.job.status)&&Date.now()-x.job.created>300000)
+    .forEach(x=>props.deleteProperty(x.key));
+}
+function fbArchiveAuthenticate(e,props){
+  const envelope=JSON.parse(e.postData.contents);
+  if(typeof envelope.payload!=='string'||envelope.payload.length>8192||!/^[a-f0-9]{64}$/.test(envelope.signature||''))throw new Error('unauthorized');
+  const key=props.getProperty('FB_ARCHIVE_KEY');
+  if(!key||key.length<32)throw new Error('unauthorized');
+  const expected=Utilities.computeHmacSha256Signature(envelope.payload,key,Utilities.Charset.UTF_8)
+    .map(x=>('0'+((x+256)%256).toString(16)).slice(-2)).join('');
+  let diff=0;for(let i=0;i<64;i++)diff|=expected.charCodeAt(i)^envelope.signature.charCodeAt(i);
+  if(diff)throw new Error('unauthorized');
+  const p=JSON.parse(envelope.payload),uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+  if(!Number.isInteger(p.timestamp)||Math.abs(Date.now()-p.timestamp)>300000||!uuid.test(p.request_id||'')||!uuid.test(p.nonce||'')||
+    !['preview','archive','clear','status','cancel'].includes(p.action)||String(p.owner_id)!==props.getProperty('FB_ARCHIVE_OWNER_ID')||
+    p.spreadsheet_id!==FB_ARCHIVE_IFT||props.getProperty('FB_ARCHIVE_SHEET_ID')!==FB_ARCHIVE_IFT)throw new Error('unauthorized');
+  return p;
+}
+function fbArchiveDispatch(p,props){
+  const key='FB_ARCHIVE_JOB_'+p.request_id,stored=props.getProperty(key);
+  let job=stored?JSON.parse(stored):null;
+  if(job&&(job.owner!==String(p.owner_id)||job.scope!==p.spreadsheet_id))throw new Error('unauthorized');
+  if(p.action==='status'&&!job)return {protocol:1,ok:true,status:'not_found',request_id:p.request_id};
+  if(job&&['complete','kept','cancelled','stale'].includes(job.status))return fbArchiveReply(job);
+  if(job&&job.nonces&&job.nonces.includes(p.nonce))return fbArchiveReply(job);
+  if(p.action==='preview'&&!job){
+    const active=Object.values(props.getProperties()).filter(v=>v.startsWith('{')).map(v=>{try{return JSON.parse(v);}catch(_){return {};}})
+      .find(j=>j.scope===p.spreadsheet_id&&j.id&& !['complete','kept','cancelled','stale'].includes(j.status));
+    if(active)return {protocol:1,ok:false,code:'request_in_progress',request_id:active.id};
+  }
+  if(!job&&p.action!=='preview')return {protocol:1,ok:true,status:'not_found',request_id:p.request_id};
+  const ss=SpreadsheetApp.openById(FB_ARCHIVE_IFT);
+  const save=()=>fbArchivePut(props,job),stamp=status=>{job.status=status;save();};
+  const stale=()=>{job.code='source_changed';stamp('stale');return fbArchiveReply(job);};
+  try{
+    if(p.action==='preview'&&!job){
+      fbMetadata(ss,true);const c=fbArchiveContext(ss);
+      job={id:p.request_id,owner:String(p.owner_id),scope:p.spreadsheet_id,created:Date.now(),status:'preview',
+        period:c.period.key,month:c.period.month,year:c.period.year,name:c.name,archiveName:c.archiveName,
+        revision:c.before.taxonomy_revision,source:fbArchiveSource(c),priorArchive:fbArchiveStored(ss,c.archiveName),
+        replace:c.found>=0||Boolean(c.old),nonces:[p.nonce]};save();return fbArchiveReply(job);
+    }
+    if(p.action==='cancel'&&['preview','archived'].includes(job.status)){
+      stamp(job.status==='archived'?'kept':'cancelled');return fbArchiveReply(job);
+    }
+    if(p.action==='status'||job.status==='complete'){
+      if(['clearing','advancing','complete_pending'].includes(job.status)){
+        const meta=fbMetadata(ss,false),period=fbPeriod(fbRows(ss,FB.analytics));
+        const next=job.month===12?{month:1,year:job.year+1}:{month:job.month+1,year:job.year};
+        const empty=fbRows(ss,FB.ledger).slice(1).every(row=>row.slice(0,6).every(x=>x===''||x===null));
+        if(job.status==='complete_pending'&&meta.access_mode==='open'&&period.key===String(next.year)+'-'+String(next.month).padStart(2,'0')){stamp('complete');return fbArchiveReply(job);}
+        if(!empty||meta.taxonomy_revision!==job.revision||fbArchiveStored(ss,job.archiveName)!==job.savedArchive||
+          ![job.period,String(next.year)+'-'+String(next.month).padStart(2,'0')].includes(period.key)){
+          job.code='recovery_required';stamp('recovery_required');return fbArchiveReply(job);
+        }
+        fbClearArchive(ss,{period:{month:job.month,year:job.year}},stage=>stamp(stage==='complete'?'complete_pending':stage));
+        fbSetMeta(ss,{access_mode:'open'});stamp('complete');
+      }else if(job.status==='archiving'){
+        job.code='recovery_required';stamp('recovery_required');
+      }
+      return fbArchiveReply(job);
+    }
+    if(p.action==='archive'&&job.status==='preview'){
+      fbMetadata(ss,true);if(fbArchiveCurrentSource(ss)!==job.source)return stale();const c=fbArchiveContext(ss);
+      if(fbArchiveSource(c)!==job.source||fbArchiveStored(ss,job.archiveName)!==job.priorArchive)return stale();
+      job.nonces.push(p.nonce);stamp('archiving');fbSetMeta(ss,{access_mode:'maintenance'});
+      const archive=fbSaveArchive(ss,c);
+      job.savedArchive=fbArchiveStored(ss,job.archiveName);
+      job.url='https://docs.google.com/spreadsheets/d/'+ss.getId()+'/edit#gid='+archive.getSheetId();
+      stamp('archived');fbSetMeta(ss,{access_mode:'open'});return fbArchiveReply(job);
+    }
+    if(p.action==='clear'&&job.status==='archived'){
+      fbMetadata(ss,true);if(fbArchiveCurrentSource(ss)!==job.source)return stale();const c=fbArchiveContext(ss);
+      if(fbArchiveSource(c)!==job.source||fbArchiveStored(ss,job.archiveName)!==job.savedArchive)return stale();
+      job.nonces.push(p.nonce);stamp('clearing');fbSetMeta(ss,{access_mode:'maintenance'});
+      fbClearArchive(ss,c,stage=>stamp(stage==='complete'?'complete_pending':stage));fbSetMeta(ss,{access_mode:'open'});stamp('complete');return fbArchiveReply(job);
+    }
+    return fbArchiveReply(job);
+  }catch(error){
+    if(job&&['archiving','clearing','advancing','complete_pending'].includes(job.status)){
+      // Persist the checkpoint. Status can prove completion of clear/advance;
+      // uncertain archive writes require operator recovery and stay blocked.
+      job.code='operation_failed';save();return fbArchiveReply(job);
+    }
+    return {protocol:1,ok:false,code:'invalid_source',request_id:p.request_id};
+  }
+}
+function doPost(e){
+  const props=PropertiesService.getScriptProperties();let p;
+  try{p=fbArchiveAuthenticate(e,props);}catch(_){return ContentService.createTextOutput(JSON.stringify({protocol:1,ok:false,code:'unauthorized'})).setMimeType(ContentService.MimeType.JSON);}
+  const lock=fbLock();let result;
+  try{lock.waitLock(30000);result=fbArchiveDispatch(p,props);}
+  catch(_){result={protocol:1,ok:false,code:'busy',request_id:p.request_id};}
+  finally{lock.releaseLock();}
+  return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
 }
 if(typeof module!=='undefined')module.exports={FB,fbName,fbDate,fbAmount,fbReconcile,fbArchiveValues,fbPeriod};

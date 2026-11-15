@@ -240,3 +240,5 @@ for(const mode of ['decline-replace','decline-clear','snapshot-failure','invalid
   assert.equal(e.writes.filter(x=>x.sheet===e.api.FB.analytics).length,0,mode);
 }
 console.log('Apps Script month advance: cancellations and pre-advance failures leave period untouched');
+
+if(typeof module!=='undefined')module.exports={environment};

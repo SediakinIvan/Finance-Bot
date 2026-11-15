@@ -29,3 +29,22 @@ class TestStandProvisioningTests(unittest.TestCase):
                 with self.assertRaises(ValueError):prepare(self.production,target,token)
         self.assertEqual(self.production.read_text(),self.original)
         self.assertFalse(self.target.exists())
+
+    def test_archive_settings_survive_test_redeploy_without_production_inheritance(self):
+        self.target.parent.mkdir(parents=True)
+        key='private_test_key_'*4
+        endpoint='https://script.google.com/macros/s/test-deployment/exec'
+        self.target.write_text(f'MONTH_ARCHIVE_ENABLED=true\nMONTH_ARCHIVE_URL={endpoint}\nMONTH_ARCHIVE_KEY={key}\n')
+        prepare(self.production,self.target,'222:test_token')
+        values=dict(line.split('=',1) for line in self.target.read_text().splitlines())
+        self.assertEqual(values['MONTH_ARCHIVE_KEY'],key)
+        self.assertEqual(values['MONTH_ARCHIVE_URL'],endpoint)
+        self.assertEqual(self.production.read_text(),self.original)
+        self.assertEqual(self.target.stat().st_mode & 0o777,0o600)
+
+    def test_invalid_saved_archive_config_does_not_replace_existing_env(self):
+        self.target.parent.mkdir(parents=True)
+        content='MONTH_ARCHIVE_ENABLED=true\nMONTH_ARCHIVE_URL=https://evil.example\nMONTH_ARCHIVE_KEY=short\n'
+        self.target.write_text(content)
+        with self.assertRaises(ValueError):prepare(self.production,self.target,'222:test_token')
+        self.assertEqual(self.target.read_text(),content)
