@@ -1,4 +1,4 @@
-"""Signed calls to the IFT Apps Script archive; never calculates financial totals."""
+"""Signed calls to the Apps Script archive; never calculates financial totals."""
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 import httpx
 
 IFT_ARCHIVE_SHEET = '1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA'
+PRODUCTION_ARCHIVE_SHEET = '1I6_HFCMVmxOD5buP6RdhtfJHld66tj7oMGArpW4AEC4'
 TERMINAL = {'complete', 'kept', 'cancelled', 'stale'}
 
 
@@ -26,8 +27,12 @@ class ArchiveError(Exception):
 
 
 def validate_archive_config(url, key, spreadsheet):
-    if spreadsheet != IFT_ARCHIVE_SHEET or not re.fullmatch(r'[A-Za-z0-9_-]{32,}', key) or not re.fullmatch(r'https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec', url):
-        raise ValueError('Archive requires an IFT workbook, /exec endpoint and private key of at least 32 characters')
+    if (
+        spreadsheet not in {IFT_ARCHIVE_SHEET, PRODUCTION_ARCHIVE_SHEET}
+        or not re.fullmatch(r'[A-Za-z0-9_-]{32,}', key)
+        or not re.fullmatch(r'https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec', url)
+    ):
+        raise ValueError('Archive requires a supported workbook, /exec endpoint and private key of at least 32 characters')
 
 
 class ArchiveClient:

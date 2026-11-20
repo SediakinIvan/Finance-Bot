@@ -1,28 +1,39 @@
 const assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {environment}=require('./test_archive_script.cjs');
 const BOOK='1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA',KEY='offline-test-key-'.repeat(4);
+const PRODUCTION='1I6_HFCMVmxOD5buP6RdhtfJHld66tj7oMGArpW4AEC4';
 let seq=10;const uuid=()=>`10000000-0000-4000-8000-${String(seq++).padStart(12,'0')}`;
-function remote(){
+function remote(book=BOOK){
   const e=environment();let opens=0;
-  e.ss.getId=()=>BOOK;e.sheets.get(e.api.FB.meta).rows.find(r=>r[0]==='spreadsheet_id')[1]=BOOK;
-  const values={FB_ARCHIVE_KEY:KEY,FB_ARCHIVE_OWNER_ID:'1',FB_ARCHIVE_SHEET_ID:BOOK};
+  e.ss.getId=()=>book;e.sheets.get(e.api.FB.meta).rows.find(r=>r[0]==='spreadsheet_id')[1]=book;
+  const values={FB_ARCHIVE_KEY:KEY,FB_ARCHIVE_OWNER_ID:'1',FB_ARCHIVE_SHEET_ID:book};
   const props={getProperty:k=>values[k]??null,setProperty:(k,v)=>{values[k]=v;},getProperties:()=>({...values}),deleteProperty:k=>{delete values[k];}};
   e.scope.PropertiesService={getScriptProperties:()=>props};
   e.scope.Utilities.DigestAlgorithm={SHA_256:'sha256'};e.scope.Utilities.Charset={UTF_8:'utf8'};
   e.scope.Utilities.computeDigest=(_alg,s)=>[...crypto.createHash('sha256').update(s).digest()];
   e.scope.Utilities.computeHmacSha256Signature=(s,k)=>[...crypto.createHmac('sha256',k).update(s).digest()];
-  e.scope.SpreadsheetApp.openById=id=>{assert.equal(id,BOOK);opens++;return e.ss;};
+  e.scope.SpreadsheetApp.openById=id=>{assert.equal(id,book);opens++;return e.ss;};
   e.scope.SpreadsheetApp.getUi=()=>{throw Error('No UI in web app');};
   e.scope.SpreadsheetApp.getActiveSpreadsheet=()=>{throw Error('No active document');};
   e.scope.LockService.getScriptLock=()=>({waitLock(){},releaseLock(){},tryLock(){return true;}});
   e.scope.LockService.getDocumentLock=()=>{throw Error('No document lock');};
   e.scope.ContentService={MimeType:{JSON:'json'},createTextOutput:text=>({text,setMimeType(){return this;}})};
   function send(action,id,changes={},signature){
-    const payload=JSON.stringify({action,request_id:id,owner_id:1,spreadsheet_id:BOOK,timestamp:Date.now(),nonce:uuid(),...changes});
+    const payload=JSON.stringify({action,request_id:id,owner_id:1,spreadsheet_id:book,timestamp:Date.now(),nonce:uuid(),...changes});
     const signed=signature??crypto.createHmac('sha256',KEY).update(payload).digest('hex');
     return JSON.parse(e.scope.doPost({postData:{contents:JSON.stringify({payload,signature:signed})}}).text);
   }
   return {...e,send,values,opens:()=>opens};
+}
+for(const [book,otherBook] of [[BOOK,PRODUCTION],[PRODUCTION,BOOK]]){
+  const e=remote(book),id=uuid();
+  assert.equal(e.send('status',uuid(),{spreadsheet_id:otherBook}).code,'unauthorized');
+  assert.equal(e.send('status',uuid()).status,'not_found');
+  assert.equal(e.opens(),0);
+  assert.equal(e.send('preview',id).status,'preview');
+  assert.equal(e.send('archive',id).status,'archived');
+  assert.equal(e.send('cancel',id).status,'kept');
+  assert.equal(e.cleared.length,0);
 }
 {
   const e=remote(),id=uuid();const preview=e.send('preview',id);assert.equal(preview.status,'preview');

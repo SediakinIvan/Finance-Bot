@@ -7,7 +7,13 @@ import unittest
 from uuid import uuid4
 
 import httpx
-from finance_bot.archive_client import ArchiveClient, ArchiveError, IFT_ARCHIVE_SHEET, validate_archive_config
+from finance_bot.archive_client import (
+    ArchiveClient,
+    ArchiveError,
+    IFT_ARCHIVE_SHEET,
+    PRODUCTION_ARCHIVE_SHEET,
+    validate_archive_config,
+)
 
 URL='https://script.google.com/macros/s/test-deployment/exec'
 KEY='offline-test-key-'*4
@@ -72,7 +78,8 @@ class ArchiveClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await client.begin())['status'],'archived');self.assertEqual(client._load(),active)
 
     def test_production_and_unsafe_or_unconfigured_endpoints_are_refused(self):
-        for url,key,book in [(URL,KEY,'production'),('https://script.google.com/dev',KEY,IFT_ARCHIVE_SHEET),(URL,'short',IFT_ARCHIVE_SHEET)]:
+        validate_archive_config(URL, KEY, PRODUCTION_ARCHIVE_SHEET)
+        for url,key,book in [(URL,KEY,'unknown-book'),('https://script.google.com/dev',KEY,IFT_ARCHIVE_SHEET),(URL,'short',IFT_ARCHIVE_SHEET)]:
             with self.assertRaises(ValueError):validate_archive_config(url,key,book)
 
     def test_enabled_settings_are_ift_only_and_do_not_expose_key_in_repr(self):

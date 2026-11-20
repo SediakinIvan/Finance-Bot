@@ -174,7 +174,7 @@ console.log('Apps Script archive: eight natively rebound charts skip redundant r
 {
   const e=environment(),items=[];let added=false;
   e.scope.SpreadsheetApp.getUi=()=>({createMenu(name){
-    assert.equal(name,'Финансы ИФТ');return {
+    assert.equal(name,'Финансы');return {
       addItem(label,handler){items.push([label,handler]);return this;},
       addToUi(){added=true;}
     };
@@ -187,7 +187,7 @@ console.log('Apps Script archive: eight natively rebound charts skip redundant r
 {
   const e=environment(),before=clone(e.sheets.get(e.api.FB.meta).rows);
   e.scope.SpreadsheetApp.getUi=()=>{throw new Error('Cannot call SpreadsheetApp.getUi() from this context.');};
-  assert.throws(()=>e.scope.saveMonthlyReport(),/Финансы ИФТ/);
+  assert.throws(()=>e.scope.saveMonthlyReport(),/Финансы →/);
   assert.deepEqual(e.sheets.get(e.api.FB.meta).rows,before);
   assert.equal(e.sheets.has(e.api.FB.archive),false);assert.equal(e.cleared.length,0);
 }

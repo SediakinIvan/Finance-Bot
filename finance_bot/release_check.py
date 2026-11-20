@@ -64,7 +64,6 @@ def main(expected_spreadsheet_id=None):
         print(f"::error title=Release compatibility check::{stage}: {reason}", flush=True)
         raise SystemExit("Release blocked before container replacement.") from None
     if getattr(settings, "month_archive_enabled", False):
-        stage = "IFT archive endpoint protocol"
         try:
             import asyncio
             from uuid import uuid4
@@ -76,7 +75,7 @@ def main(expected_spreadsheet_id=None):
             if result["status"] != "not_found":
                 raise ValueError("Unexpected health check response")
         except Exception:
-            raise SystemExit("Release blocked before container replacement: IFT archive endpoint check failed.") from None
+            raise SystemExit("Release blocked before container replacement: archive endpoint check failed.") from None
     print("Release check passed: all configured workbooks are v2/ready or have a supported recovery journal; journal is writable.")
 
 

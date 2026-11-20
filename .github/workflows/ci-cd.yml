@@ -40,6 +40,7 @@ jobs:
         run: |
           node tests/test_apps_script.cjs
           node tests/test_archive_script.cjs
+          node tests/test_archive_web.cjs
       - name: Build container image
         run: docker build --build-arg GIT_COMMIT="$GITHUB_SHA" --tag finance-bot:test .
 

@@ -106,7 +106,7 @@ class Settings:
             try:
                 validate_archive_config(archive_url, archive_key, required["GOOGLE_SHEET_ID"])
                 if additional_user_sheets:
-                    raise ValueError("Archive is limited to the primary IFT owner")
+                    raise ValueError("Archive is limited to the primary workbook owner")
             except ValueError as exc:
                 raise ConfigurationError(str(exc)) from None
         return cls(

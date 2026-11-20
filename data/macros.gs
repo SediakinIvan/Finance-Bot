@@ -202,7 +202,7 @@ function fbArchiveValues(rows,registry,period){
   return {income,expenses,balance:income-expenses,totals};
 }
 function onOpen(){
-  SpreadsheetApp.getUi().createMenu('Финансы ИФТ')
+  SpreadsheetApp.getUi().createMenu('Финансы')
     .addItem('Сохранить месячный отчёт','saveMonthlyReport').addToUi();
 }
 function fbLock(){return LockService.getScriptLock?LockService.getScriptLock():LockService.getDocumentLock();}
@@ -293,7 +293,7 @@ function saveMonthlyReport(){
   const ss=SpreadsheetApp.getActiveSpreadsheet();
   let ui;
   try{ui=SpreadsheetApp.getUi();}
-  catch(error){throw new Error('Нет доступа к интерфейсу таблицы. Перезагрузите ИФТ-таблицу и выберите «Финансы ИФТ → Сохранить месячный отчёт». Данные не изменены.');}
+  catch(error){throw new Error('Нет доступа к интерфейсу таблицы. Перезагрузите таблицу и выберите «Финансы → Сохранить месячный отчёт». Данные не изменены.');}
   const lock=fbLock();fbMetadata(ss,true);lock.waitLock(30000);
   let cleanExit=false,archiveTouched=false;
   try{
@@ -312,8 +312,11 @@ function saveMonthlyReport(){
     lock.releaseLock();
   }
 }
-// The web entry is enabled only in the separately deployed IFT script project.
-const FB_ARCHIVE_IFT='1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA';
+// Each deployment serves one configured book and has its own signing key.
+const FB_ARCHIVE_BOOKS=new Set([
+  '1jaEzmJPqYzxSp-HtDw-zwt_kPqSEs4enBrkG-Lc-UzA',
+  '1I6_HFCMVmxOD5buP6RdhtfJHld66tj7oMGArpW4AEC4'
+]);
 function fbArchiveHash(value){
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,JSON.stringify(value),Utilities.Charset.UTF_8)
     .map(x=>('0'+((x+256)%256).toString(16)).slice(-2)).join('');
@@ -348,9 +351,10 @@ function fbArchiveAuthenticate(e,props){
   let diff=0;for(let i=0;i<64;i++)diff|=expected.charCodeAt(i)^envelope.signature.charCodeAt(i);
   if(diff)throw new Error('unauthorized');
   const p=JSON.parse(envelope.payload),uuid=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+  const book=props.getProperty('FB_ARCHIVE_SHEET_ID');
   if(!Number.isInteger(p.timestamp)||Math.abs(Date.now()-p.timestamp)>300000||!uuid.test(p.request_id||'')||!uuid.test(p.nonce||'')||
     !['preview','archive','clear','status','cancel'].includes(p.action)||String(p.owner_id)!==props.getProperty('FB_ARCHIVE_OWNER_ID')||
-    p.spreadsheet_id!==FB_ARCHIVE_IFT||props.getProperty('FB_ARCHIVE_SHEET_ID')!==FB_ARCHIVE_IFT)throw new Error('unauthorized');
+    !FB_ARCHIVE_BOOKS.has(book)||p.spreadsheet_id!==book)throw new Error('unauthorized');
   return p;
 }
 function fbArchiveDispatch(p,props){
@@ -366,7 +370,7 @@ function fbArchiveDispatch(p,props){
     if(active)return {protocol:1,ok:false,code:'request_in_progress',request_id:active.id};
   }
   if(!job&&p.action!=='preview')return {protocol:1,ok:true,status:'not_found',request_id:p.request_id};
-  const ss=SpreadsheetApp.openById(FB_ARCHIVE_IFT);
+  const ss=SpreadsheetApp.openById(p.spreadsheet_id);
   const save=()=>fbArchivePut(props,job),stamp=status=>{job.status=status;save();};
   const stale=()=>{job.code='source_changed';stamp('stale');return fbArchiveReply(job);};
   try{
